@@ -1,0 +1,9 @@
+app:
+  name: example-app
+  addr: ":8080"
+
+database:
+  dsn: "" # empty = no database connection
+
+log:
+  level: debug
