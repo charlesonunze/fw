@@ -2,147 +2,263 @@ package fw
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/charlesonunze/fw/middleware"
-	"github.com/go-chi/chi/v5"
+	"google.golang.org/grpc"
 )
 
-// App is the application container that manages modules, dependencies, and the HTTP server.
+// App is the application container that manages modules, services,
+// and the HTTP and gRPC servers.
 type App struct {
-	modules    []Module
-	router     chi.Router
-	deps       *Deps
-	configPath string
-	addr       string
+	modules       []Module
+	preRegistered []Service
+	middleware    []func(http.Handler) http.Handler
+	router        Router
+	grpcServer    *grpc.Server
+	logger        Logger
+	services      *ServiceRegistry
+	httpAddr      string
+	grpcAddr      string
 }
 
 // Option configures the App.
-type Option func(*App)
-
-// WithAddr sets the HTTP server listen address.
-func WithAddr(addr string) Option {
-	return func(a *App) {
-		a.addr = addr
-	}
-}
-
-// WithConfigPath sets the path to the YAML config file.
-func WithConfigPath(path string) Option {
-	return func(a *App) {
-		a.configPath = path
-	}
-}
+type OptionsFunc func(*App)
 
 // New creates a new App with the given options.
-func New(opts ...Option) *App {
+func New(opts ...OptionsFunc) *App {
 	a := &App{
-		addr:       ":8080",
-		configPath: "config.yaml",
+		httpAddr: ":8888",
+		grpcAddr: ":9999",
 	}
-
 	for _, opt := range opts {
 		opt(a)
 	}
-
 	return a
 }
 
-// Register adds modules to the app.
-func (a *App) Register(modules ...Module) {
+// WithAddr sets the HTTP server listen address. Default: ":8888".
+func WithAddr(addr string) OptionsFunc {
+	return func(a *App) { a.httpAddr = addr }
+}
+
+// WithGRPCAddr sets the gRPC server listen address. Default: ":9999".
+// Set to "-" to disable gRPC entirely.
+func WithGRPCAddr(addr string) OptionsFunc {
+	return func(a *App) { a.grpcAddr = addr }
+}
+
+// WithRouter sets a custom router (e.g. fw.ChiRouter(r), a gin adapter, etc.).
+// If not set, fw uses a bare chi router.
+func WithRouter(r Router) OptionsFunc {
+	return func(a *App) { a.router = r }
+}
+
+// WithGRPCServer sets a pre-configured gRPC server.
+// Use this to supply interceptors, TLS credentials, keepalive options, etc.
+// If not set and at least one module implements GRPCModule, fw creates a
+// plain grpc.NewServer().
+func WithGRPCServer(s *grpc.Server) OptionsFunc {
+	return func(a *App) { a.grpcServer = s }
+}
+
+// WithLogger sets a custom logger implementation.
+// If not set, fw uses a JSON slog logger at INFO level.
+func WithLogger(l Logger) OptionsFunc {
+	return func(a *App) { a.logger = l }
+}
+
+// Use registers global HTTP middleware applied to every route.
+// Must be called before Start().
+func (a *App) Use(middleware ...func(http.Handler) http.Handler) {
+	a.middleware = append(a.middleware, middleware...)
+}
+
+// RegisterService registers an external service like redis, db, or inernal services before modules
+// are initialized. Modules retrieve it via fw.GetService[T](deps.Services).
+// Services are shut down gracefully on exit.
+func (a *App) RegisterService(svc Service) {
+	a.preRegistered = append(a.preRegistered, svc)
+}
+
+// RegisterModules adds modules to the app.
+// Registration order does not matter — services are resolved lazily at call time,
+// not during Init.
+func (a *App) RegisterModules(modules ...Module) {
 	a.modules = append(a.modules, modules...)
 }
 
-// Start initializes all dependencies and modules, starts the HTTP server,
-// and blocks until a shutdown signal is received.
+// Start initializes all services and modules, starts the HTTP server
+// (and optionally a gRPC server), and blocks until a shutdown signal is received.
 func (a *App) Start() error {
-	// Load config
-	cfg, err := LoadConfig(a.configPath)
-	if err != nil {
-		return fmt.Errorf("fw: %w", err)
+	a.setup()
+
+	deps := &Deps{
+		Logger:   a.logger,
+		Services: a.services,
 	}
 
-	// Apply config overrides
-	if a.addr != "" && cfg.App.Addr != "" {
-		// Config file takes precedence if set
-		a.addr = cfg.App.Addr
+	if err := a.initModules(deps); err != nil {
+		return err
 	}
 
-	// Create logger
-	logger := NewLogger(cfg.Log.Level)
+	a.registerRoutes()
 
-	// Open database (returns nil if no DSN configured)
-	db, err := OpenDatabase(cfg.Database)
-	if err != nil {
-		return fmt.Errorf("fw: %w", err)
+	if err := a.buildGRPCServer(); err != nil {
+		return err
 	}
 
-	// Create event bus
-	events := NewEventBus()
+	return a.serve()
+}
 
-	// Create service registry
-	services := NewServiceRegistry()
-
-	// Build deps
-	a.deps = &Deps{
-		DB:       db,
-		Logger:   logger,
-		Config:   cfg,
-		Events:   events,
-		Services: services,
+// setup initialises shared state before modules are wired.
+func (a *App) setup() {
+	if a.logger == nil {
+		a.logger = newDefaultLogger("info")
 	}
+	a.services = NewServiceRegistry()
+	for _, svc := range a.preRegistered {
+		a.services.Register(svc)
+	}
+	if a.router == nil {
+		a.router = newChiRouter()
+	}
+	a.router.Use(a.middleware...)
+}
 
-	// Create router with default middleware
-	a.router = chi.NewRouter()
-	a.router.Use(middleware.RequestID)
-	a.router.Use(middleware.Recovery(logger))
-	a.router.Use(middleware.Logging(logger))
-
-	// Initialize all modules
+// initModules calls Init on every registered module.
+func (a *App) initModules(deps *Deps) error {
 	for _, mod := range a.modules {
-		logger.Info("initializing module", "module", mod.Name())
-		if err := mod.Init(a.deps); err != nil {
+		a.logger.Info("initializing module", "module", mod.Name())
+		if err := mod.Init(deps); err != nil {
 			return fmt.Errorf("fw: failed to initialize module %q: %w", mod.Name(), err)
 		}
 	}
+	return nil
+}
 
-	// Register routes for all modules
+// registerRoutes mounts HTTP routes and health endpoints.
+func (a *App) registerRoutes() {
 	for _, mod := range a.modules {
-		mod.RegisterRoutes(a.router)
+		if hm, ok := mod.(HTTPModule); ok {
+			hm.RegisterRoutes(a.router)
+		}
 	}
+	a.router.Get("/health/live", a.livenessHandler())
+	a.router.Get("/health/ready", a.readinessHandler())
+}
 
-	// Health check endpoint
-	a.router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
+// buildGRPCServer wires gRPC if any modules implement GRPCModule.
+func (a *App) buildGRPCServer() error {
+	if a.grpcAddr == "" || a.grpcAddr == "-" {
+		return nil
+	}
+	var grpcModules []GRPCModule
+	for _, mod := range a.modules {
+		if gm, ok := mod.(GRPCModule); ok {
+			grpcModules = append(grpcModules, gm)
+		}
+	}
+	if len(grpcModules) == 0 {
+		return nil
+	}
+	if a.grpcServer == nil {
+		a.grpcServer = grpc.NewServer()
+	}
+	for _, gm := range grpcModules {
+		gm.RegisterGRPC(a.grpcServer)
+	}
+	return nil
+}
 
-	// Create HTTP server
-	server := &http.Server{
-		Addr:    a.addr,
+// serve starts the HTTP (and optionally gRPC) server and blocks.
+func (a *App) serve() error {
+	httpServer := &http.Server{
+		Addr:    a.httpAddr,
 		Handler: a.router,
 	}
 
-	// Start server in a goroutine
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
+
 	go func() {
-		logger.Info("starting server", "addr", a.addr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- fmt.Errorf("fw: server error: %w", err)
+		a.logger.Info("starting http server", "addr", a.httpAddr)
+		err := httpServer.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			errCh <- fmt.Errorf("fw: http server error: %w", err)
 		}
 	}()
 
-	// Wait for shutdown signal
-	return a.waitForShutdown(server, logger, errCh)
+	if a.grpcServer != nil {
+		lis, err := net.Listen("tcp", a.grpcAddr)
+		if err != nil {
+			return fmt.Errorf("fw: failed to listen on gRPC addr %q: %w", a.grpcAddr, err)
+		}
+		go func() {
+			a.logger.Info("starting grpc server", "addr", a.grpcAddr)
+			err := a.grpcServer.Serve(lis)
+			if err != nil {
+				errCh <- fmt.Errorf("fw: grpc server error: %w", err)
+			}
+		}()
+	}
+
+	return a.waitForShutdown(httpServer, errCh)
 }
 
-func (a *App) waitForShutdown(server *http.Server, logger *slog.Logger, errCh chan error) error {
+// livenessHandler always returns 200 — the process is alive.
+func (a *App) livenessHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}
+}
+
+type moduleHealthStatus struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+type readinessResponse struct {
+	Status  string                        `json:"status"`
+	Modules map[string]moduleHealthStatus `json:"modules"`
+}
+
+// readinessHandler calls Health() on every module and aggregates results.
+// Returns 200 if all healthy, 503 if any are degraded.
+func (a *App) readinessHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		resp := readinessResponse{
+			Status:  "ok",
+			Modules: make(map[string]moduleHealthStatus),
+		}
+
+		for _, mod := range a.modules {
+			if err := mod.Health(ctx); err != nil {
+				resp.Modules[mod.Name()] = moduleHealthStatus{Status: "error", Error: err.Error()}
+				resp.Status = "degraded"
+			} else {
+				resp.Modules[mod.Name()] = moduleHealthStatus{Status: "ok"}
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if resp.Status != "ok" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func (a *App) waitForShutdown(httpServer *http.Server, errCh chan error) error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -150,34 +266,45 @@ func (a *App) waitForShutdown(server *http.Server, logger *slog.Logger, errCh ch
 	case err := <-errCh:
 		return err
 	case sig := <-quit:
-		logger.Info("shutdown signal received", "signal", sig.String())
+		a.logger.Info("shutdown signal received", "signal", sig.String())
 	}
 
-	// Graceful shutdown with 30s timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Shutdown HTTP server
-	if err := server.Shutdown(ctx); err != nil {
-		logger.Error("server shutdown error", "error", err)
+	if err := httpServer.Shutdown(ctx); err != nil {
+		a.logger.Error("HTTP server shutdown error", "error", err)
 	}
 
-	// Close all modules in reverse order
-	for i := len(a.modules) - 1; i >= 0; i-- {
-		mod := a.modules[i]
-		logger.Info("closing module", "module", mod.Name())
+	if a.grpcServer != nil {
+		done := make(chan struct{})
+		go func() {
+			a.grpcServer.GracefulStop()
+			close(done)
+		}()
+		select {
+		case <-done:
+			a.logger.Info("gRPC server stopped gracefully")
+		case <-ctx.Done():
+			a.logger.Warn("gRPC graceful stop timed out, forcing stop")
+			a.grpcServer.Stop()
+		}
+	}
+
+	for _, mod := range a.modules {
+		a.logger.Info("closing module", "module", mod.Name())
 		if err := mod.Close(); err != nil {
-			logger.Error("module close error", "module", mod.Name(), "error", err)
+			a.logger.Error("module close error", "module", mod.Name(), "error", err)
 		}
 	}
 
-	// Close database
-	if a.deps.DB != nil {
-		if err := a.deps.DB.Close(); err != nil {
-			logger.Error("database close error", "error", err)
+	for _, svc := range a.preRegistered {
+		a.logger.Info("closing service", "service", svc.Name())
+		if err := svc.Close(); err != nil {
+			a.logger.Error("service close error", "service", svc.Name(), "error", err)
 		}
 	}
 
-	logger.Info("shutdown complete")
+	a.logger.Info("shutdown complete")
 	return nil
 }

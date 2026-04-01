@@ -5,6 +5,8 @@
 *.so
 *.dylib
 fw
+.bin/
+bin/
 
 # Test binary
 *.test

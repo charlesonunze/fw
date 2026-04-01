@@ -177,7 +177,12 @@ func extractMethods(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+
+	defer func() {
+		if err := f.Close(); err != nil {
+			fmt.Printf("failed to close file")
+		}
+	}()
 
 	pattern := regexp.MustCompile(`^func \(\w+ \*\w+\) ([A-Z]\w+)\(`)
 
@@ -271,13 +276,21 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() {
+		if err := in.Close(); err != nil {
+			fmt.Printf("failed to close input file")
+		}
+	}()
 
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		if err := out.Close(); err != nil {
+			fmt.Printf("failed to close output file")
+		}
+	}()
 
 	_, err = io.Copy(out, in)
 	return err
@@ -297,7 +310,6 @@ import (
 func main() {
 	app := fw.New(
 		fw.WithAddr("{{ .Port }}"),
-		fw.WithConfigPath("config.yaml"),
 	)
 
 	app.Register(

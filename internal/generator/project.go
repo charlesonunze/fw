@@ -12,7 +12,7 @@ type projectData struct {
 	ModulePath  string
 }
 
-// NewProject scaffolds a new project directory with go.mod, main.go, and config.yaml.
+// NewProject scaffolds a new project directory with go.mod and main.go.
 // If localFwPath is non-empty, a replace directive is added to go.mod for local development.
 func NewProject(name, modulePath, localFwPath string) error {
 	if _, err := os.Stat(name); err == nil {
@@ -26,7 +26,6 @@ func NewProject(name, modulePath, localFwPath string) error {
 
 	files := map[string]string{
 		filepath.Join(name, "cmd", "main.go"): projectMainTmpl,
-		filepath.Join(name, "config.yaml"):    projectConfigTmpl,
 	}
 
 	for path, tmpl := range files {
@@ -88,11 +87,10 @@ import (
 func main() {
 	app := fw.New(
 		fw.WithAddr(":8080"),
-		fw.WithConfigPath("config.yaml"),
 	)
 
 	// Register your modules here:
-	// app.Register(
+	// app.RegisterModules(
 	// 	user.New(),
 	// )
 
@@ -100,15 +98,4 @@ func main() {
 		log.Fatal(err)
 	}
 }
-`
-
-var projectConfigTmpl = `app:
-  name: {{ .ProjectName }}
-  addr: ":8080"
-
-database:
-  dsn: "" # e.g. postgres://user:pass@localhost:5432/dbname?sslmode=disable
-
-log:
-  level: debug
 `

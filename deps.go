@@ -1,24 +1,14 @@
 package fw
 
-import (
-	"database/sql"
-	"log/slog"
-)
-
-// Deps holds shared dependencies that are passed to every module during Init.
+// Deps holds the shared dependencies injected into every module during Init.
+//
+// Infrastructure (DB, broker, cache, config) is not hardcoded here — register
+// those as services via app.RegisterService() and retrieve them with
+// fw.GetService[T](deps.Services) inside your module's Init or service methods.
 type Deps struct {
-	// DB is the database connection pool.
-	DB *sql.DB
+	// Logger is the structured logger. Swap the implementation with WithLogger().
+	Logger Logger
 
-	// Logger is the structured logger.
-	Logger *slog.Logger
-
-	// Config holds the application configuration loaded from YAML.
-	Config *Config
-
-	// Events is the in-memory event bus for async communication.
-	Events *EventBus
-
-	// Services is the service registry for cross-module dependencies.
+	// Services is the registry for cross-module and infrastructure dependencies.
 	Services *ServiceRegistry
 }
