@@ -6,11 +6,23 @@ import (
 	"strings"
 )
 
-// NewLogger creates a structured JSON logger with the given level string.
-// Valid levels: "debug", "info", "warn", "error". Defaults to "info".
-func NewLogger(level string) *slog.Logger {
-	var lvl slog.Level
+// Logger is the logging interface fw passes to modules.
+// The default implementation wraps log/slog.
+// Swap it out with WithLogger() to use zap, zerolog, etc.
+type Logger interface {
+	Info(msg string, args ...any)
+	Error(msg string, args ...any)
+	Debug(msg string, args ...any)
+	Warn(msg string, args ...any)
+	With(args ...any) Logger
+}
 
+type slogLogger struct {
+	l *slog.Logger
+}
+
+func newDefaultLogger(level string) Logger {
+	var lvl slog.Level
 	switch strings.ToLower(level) {
 	case "debug":
 		lvl = slog.LevelDebug
@@ -21,10 +33,16 @@ func NewLogger(level string) *slog.Logger {
 	default:
 		lvl = slog.LevelInfo
 	}
-
-	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: lvl,
-	})
-
-	return slog.New(handler)
+	l := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+	return &slogLogger{l: l}
 }
+
+func (l *slogLogger) Info(msg string, args ...any) { l.l.Info(msg, args...) }
+
+func (l *slogLogger) Error(msg string, args ...any) { l.l.Error(msg, args...) }
+
+func (l *slogLogger) Debug(msg string, args ...any) { l.l.Debug(msg, args...) }
+
+func (l *slogLogger) Warn(msg string, args ...any) { l.l.Warn(msg, args...) }
+
+func (l *slogLogger) With(args ...any) Logger { return &slogLogger{l: l.l.With(args...)} }

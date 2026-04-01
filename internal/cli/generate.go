@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/charlesonunze/fw/internal/generator"
+
 	"github.com/spf13/cobra"
 )
 

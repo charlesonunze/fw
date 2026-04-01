@@ -1,0 +1,10 @@
+app:
+  name: example-app
+  addr: ":8080"
+  grpc_addr: ":9090"
+
+database:
+  dsn: "" # empty = no database connection
+
+log:
+  level: debug
