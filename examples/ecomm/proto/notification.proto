@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package notification.v1;
+
+option go_package = "github.com/charlesonunze/fw/examples/ecomm/internal/modules/notification/pb;notificationpb";
+
+// NotificationService manages user notifications.
+// It is a gRPC-only service — no HTTP transport is exposed.
+service NotificationService {
+  // Send delivers a notification to a user.
+  // Called internally by other services (order, user) via the service registry.
+  rpc Send(SendRequest) returns (SendResponse);
+
+  // Stream opens a live channel for a user's notifications.
+  // Streams new notifications as they arrive — a use case with no HTTP equivalent.
+  rpc Stream(StreamRequest) returns (stream Notification);
+}
+
+message SendRequest {
+  string user_id = 1;
+  string message = 2;
+}
+
+message SendResponse {
+  string notification_id = 1;
+}
+
+message StreamRequest {
+  string user_id = 1;
+}
+
+message Notification {
+  string id = 1;
+  string user_id = 2;
+  string message = 3;
+  int64 sent_at_unix = 4;
+}
