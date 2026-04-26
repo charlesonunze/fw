@@ -54,8 +54,7 @@ func WithGRPCAddr(addr string) OptionsFunc {
 	return func(a *App) { a.grpcAddr = addr }
 }
 
-// WithRouter sets a custom router (e.g. fw.ChiRouter(r), a gin adapter, etc.).
-// If not set, fw uses a bare chi router.
+// WithRouter sets the router. Required — use an adapter from fw/adapters/chi or fw/adapters/gin.
 func WithRouter(r Router) OptionsFunc {
 	return func(a *App) { a.router = r }
 }
@@ -127,7 +126,7 @@ func (a *App) setup() {
 		a.services.Register(svc)
 	}
 	if a.router == nil {
-		a.router = newChiRouter()
+		panic("fw: no router configured — use fw.WithRouter() with an adapter from fw/adapters/chi or fw/adapters/gin")
 	}
 	a.router.Use(a.middleware...)
 }
