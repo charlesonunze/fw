@@ -46,6 +46,9 @@ func NewProject(name, modulePath, router, localFWPath string) error {
 	if err := writeTemplate(mainPath, projectMainTmpl, data); err != nil {
 		return err
 	}
+	if err := writeDevelopmentFiles(name); err != nil {
+		return err
+	}
 
 	fmt.Printf("  init   go mod\n")
 	if err := runGo(name, "mod", "init", modulePath); err != nil {
@@ -64,7 +67,7 @@ func NewProject(name, modulePath, router, localFWPath string) error {
 	}
 
 	fmt.Printf("\nProject %q created successfully!\n", name)
-	fmt.Printf("\n  cd %s\n  fw generate module <name>\n  go run ./cmd/main.go\n\n", name)
+	fmt.Printf("\n  cd %s\n  fw generate module <name>\n  fw dev\n\n", name)
 
 	return nil
 }

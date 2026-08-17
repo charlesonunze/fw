@@ -99,6 +99,7 @@ func TestDecoupledFlatModuleCompiles(t *testing.T) {
 	); err != nil {
 		t.Fatalf("DecoupleModule() error = %v", err)
 	}
+	assertDevelopmentFiles(t, output)
 	if err := runGo(output, "mod", "tidy"); err != nil {
 		t.Fatalf("tidy decoupled module: %v", err)
 	}
