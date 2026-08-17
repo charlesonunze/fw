@@ -1,7 +1,9 @@
 package generator
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 )
 
@@ -11,7 +13,7 @@ type moduleData struct {
 	ModulePath string // go module path, e.g. "github.com/you/myapp"
 }
 
-// NewModule generates a module with domain, service, repo, api, transform, and module.go.
+// NewModule generates a flat, self-contained module package.
 func NewModule(name, modPath string) error {
 	data := moduleData{
 		Name:       name,
@@ -20,19 +22,27 @@ func NewModule(name, modPath string) error {
 	}
 
 	base := filepath.Join("internal", "modules", name)
-
-	files := map[string]string{
-		filepath.Join(base, "domain", name+"_domain.go"):       moduleDomainTmpl,
-		filepath.Join(base, "service", name+"_service.go"):     moduleServiceTmpl,
-		filepath.Join(base, "repo", name+"_repo_inmemory.go"):  moduleRepoTmpl,
-		filepath.Join(base, "api", name+"_handler.go"):         moduleHandlerTmpl,
-		filepath.Join(base, "transform", name+"_transform.go"): moduleTransformTmpl,
-		filepath.Join(base, "module.go"):                       moduleWiringTmpl,
+	if _, err := os.Stat(base); err == nil {
+		return fmt.Errorf("module %q already exists at %s", name, base)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check module path %s: %w", base, err)
 	}
 
-	for path, tmpl := range files {
-		fmt.Printf("  create %s\n", path)
-		if err := writeTemplate(path, tmpl, data); err != nil {
+	files := []struct {
+		path string
+		tmpl string
+	}{
+		{filepath.Join(base, name+"_module.go"), moduleWiringTmpl},
+		{filepath.Join(base, name+"_model.go"), moduleModelTmpl},
+		{filepath.Join(base, name+"_service.go"), moduleServiceTmpl},
+		{filepath.Join(base, name+"_repository.go"), moduleRepositoryTmpl},
+		{filepath.Join(base, name+"_repository_memory.go"), moduleMemoryRepositoryTmpl},
+		{filepath.Join(base, name+"_http.go"), moduleHTTPTmpl},
+	}
+
+	for _, file := range files {
+		fmt.Printf("  create %s\n", file.path)
+		if err := writeTemplate(file.path, file.tmpl, data); err != nil {
 			return err
 		}
 	}
@@ -40,94 +50,96 @@ func NewModule(name, modPath string) error {
 	fmt.Printf("\nModule %q created at %s\n", name, base)
 	fmt.Printf("Don't forget to register it in cmd/main.go:\n\n")
 	fmt.Printf("  import \"%s/internal/modules/%s\"\n\n", modPath, name)
-	fmt.Printf("  app.Register(\n    %s.New(),\n  )\n\n", name)
+	fmt.Printf("  app.RegisterModules(\n    %s.New(),\n  )\n\n", name)
 
 	return nil
 }
 
-var moduleDomainTmpl = `package domain
+var moduleModelTmpl = `package {{ .Name }}
 
-import "context"
-
-// {{ .Pascal }} is the domain entity.
+// {{ .Pascal }} is the module's domain entity.
 type {{ .Pascal }} struct {
 	ID string ` + "`json:\"id\"`" + `
 }
+`
 
-// {{ .Pascal }}Repository defines the data access interface.
-type {{ .Pascal }}Repository interface {
+var moduleRepositoryTmpl = `package {{ .Name }}
+
+import "context"
+
+// Repository defines the persistence required by Service.
+type Repository interface {
 	Create(ctx context.Context, entity *{{ .Pascal }}) error
 	FindByID(ctx context.Context, id string) (*{{ .Pascal }}, error)
 }
 `
 
-var moduleServiceTmpl = `package service
+var moduleServiceTmpl = `package {{ .Name }}
 
-import (
-	"context"
+import "context"
 
-	"{{ .ModulePath }}/internal/modules/{{ .Name }}/domain"
-)
-
-// {{ .Pascal }}Service contains the business logic.
-type {{ .Pascal }}Service struct {
-	repo domain.{{ .Pascal }}Repository
+// Service contains the {{ .Name }} module's business logic.
+type Service struct {
+	repo Repository
 }
 
-// New creates a new {{ .Pascal }}Service.
-func New(repo domain.{{ .Pascal }}Repository) *{{ .Pascal }}Service {
-	return &{{ .Pascal }}Service{repo: repo}
+// NewService creates a Service.
+func NewService(repo Repository) *Service {
+	return &Service{repo: repo}
 }
 
 // Name returns the service registry key.
-func (s *{{ .Pascal }}Service) Name() string { return "{{ .Name }}.service" }
+func (s *Service) Name() string { return "{{ .Name }}.service" }
 
-// Create creates a new {{ .Name }}.
-func (s *{{ .Pascal }}Service) Create(ctx context.Context, entity *domain.{{ .Pascal }}) error {
+// Close cleans up resources held by the service.
+func (s *Service) Close() error { return nil }
+
+// Create creates a {{ .Name }}.
+func (s *Service) Create(ctx context.Context, entity *{{ .Pascal }}) error {
 	return s.repo.Create(ctx, entity)
 }
 
 // GetByID returns a {{ .Name }} by ID.
-func (s *{{ .Pascal }}Service) GetByID(ctx context.Context, id string) (*domain.{{ .Pascal }}, error) {
+func (s *Service) GetByID(ctx context.Context, id string) (*{{ .Pascal }}, error) {
 	return s.repo.FindByID(ctx, id)
 }
 `
 
-var moduleRepoTmpl = `package repo
+var moduleMemoryRepositoryTmpl = `package {{ .Name }}
 
 import (
 	"context"
 	"crypto/rand"
 	"fmt"
 	"sync"
-
-	"{{ .ModulePath }}/internal/modules/{{ .Name }}/domain"
 )
 
-// {{ .Pascal }}InMemoryRepo is an in-memory implementation of {{ .Pascal }}Repository.
-type {{ .Pascal }}InMemoryRepo struct {
+// MemoryRepository stores {{ .Name }} records in memory.
+type MemoryRepository struct {
 	mu    sync.RWMutex
-	items map[string]*domain.{{ .Pascal }}
+	items map[string]*{{ .Pascal }}
 }
 
-// New creates a new in-memory repository.
-func New() *{{ .Pascal }}InMemoryRepo {
-	return &{{ .Pascal }}InMemoryRepo{
-		items: make(map[string]*domain.{{ .Pascal }}),
+// NewMemoryRepository creates an empty in-memory repository.
+func NewMemoryRepository() *MemoryRepository {
+	return &MemoryRepository{
+		items: make(map[string]*{{ .Pascal }}),
 	}
 }
 
-func (r *{{ .Pascal }}InMemoryRepo) Create(_ context.Context, entity *domain.{{ .Pascal }}) error {
+func (r *MemoryRepository) Create(_ context.Context, entity *{{ .Pascal }}) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
 	entity.ID = generateID()
 	r.items[entity.ID] = entity
 	return nil
 }
 
-func (r *{{ .Pascal }}InMemoryRepo) FindByID(_ context.Context, id string) (*domain.{{ .Pascal }}, error) {
+func (r *MemoryRepository) FindByID(_ context.Context, id string) (*{{ .Pascal }}, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
 	entity, ok := r.items[id]
 	if !ok {
 		return nil, fmt.Errorf("{{ .Name }} %q not found", id)
@@ -142,95 +154,81 @@ func generateID() string {
 }
 `
 
-var moduleHandlerTmpl = `package api
+var moduleHTTPTmpl = `package {{ .Name }}
 
 import (
+	"encoding/json"
 	"net/http"
-
-	"{{ .ModulePath }}/internal/modules/{{ .Name }}/service"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/render"
 )
 
-// {{ .Pascal }}Handler handles HTTP requests for the {{ .Name }} module.
-type {{ .Pascal }}Handler struct {
-	service *service.{{ .Pascal }}Service
+// HTTPHandler handles HTTP requests for the {{ .Name }} module.
+type HTTPHandler struct {
+	service *Service
 }
 
-// New creates a new {{ .Pascal }}Handler.
-func New(svc *service.{{ .Pascal }}Service) *{{ .Pascal }}Handler {
-	return &{{ .Pascal }}Handler{service: svc}
+// NewHTTPHandler creates an HTTPHandler.
+func NewHTTPHandler(service *Service) *HTTPHandler {
+	return &HTTPHandler{service: service}
 }
 
-// GetByID handles GET /{{ .Name }}s/{id}
-func (h *{{ .Pascal }}Handler) GetByID(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-
-	entity, err := h.service.GetByID(r.Context(), id)
+// GetByID handles GET /{{ .Name }}s/{id}.
+func (h *HTTPHandler) GetByID(w http.ResponseWriter, r *http.Request) {
+	entity, err := h.service.GetByID(r.Context(), r.PathValue("id"))
 	if err != nil {
-		render.Status(r, http.StatusNotFound)
-		render.JSON(w, r, map[string]string{"error": "{{ .Name }} not found"})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "{{ .Name }} not found"})
 		return
 	}
 
-	render.JSON(w, r, entity)
-}
-`
-
-var moduleTransformTmpl = `package transform
-
-import "{{ .ModulePath }}/internal/modules/{{ .Name }}/domain"
-
-// {{ .Pascal }}Response is the API response representation.
-type {{ .Pascal }}Response struct {
-	ID string ` + "`json:\"id\"`" + `
+	writeJSON(w, http.StatusOK, entity)
 }
 
-// To{{ .Pascal }}Response converts a domain entity to an API response.
-func To{{ .Pascal }}Response(entity *domain.{{ .Pascal }}) {{ .Pascal }}Response {
-	return {{ .Pascal }}Response{
-		ID: entity.ID,
-	}
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 `
 
 var moduleWiringTmpl = `package {{ .Name }}
 
 import (
+	"context"
+
 	"github.com/charlesonunze/fw"
-	"{{ .ModulePath }}/internal/modules/{{ .Name }}/api"
-	"{{ .ModulePath }}/internal/modules/{{ .Name }}/repo"
-	"{{ .ModulePath }}/internal/modules/{{ .Name }}/service"
-	"github.com/go-chi/chi/v5"
 )
 
-// {{ .Pascal }}Module is the {{ .Name }} module.
-type {{ .Pascal }}Module struct {
-	service *service.{{ .Pascal }}Service
-	handler *api.{{ .Pascal }}Handler
+// Module owns the {{ .Name }} domain and its transports.
+type Module struct {
+	service *Service
+	handler *HTTPHandler
 }
 
-// New creates a new {{ .Pascal }}Module.
-func New() *{{ .Pascal }}Module {
-	return &{{ .Pascal }}Module{}
+// New creates a {{ .Name }} module.
+func New() *Module {
+	return &Module{}
 }
 
-func (m *{{ .Pascal }}Module) Name() string { return "{{ .Name }}" }
+// Name returns the module name.
+func (m *Module) Name() string { return "{{ .Name }}" }
 
-func (m *{{ .Pascal }}Module) Init(deps *fw.Deps) error {
-	r := repo.New()
-	m.service = service.New(r)
-	m.handler = api.New(m.service)
+// Init wires and exposes the module's services.
+func (m *Module) Init(deps *fw.Deps) error {
+	repo := NewMemoryRepository()
+	m.service = NewService(repo)
+	m.handler = NewHTTPHandler(m.service)
 
 	deps.Services.Register(m.service)
 	return nil
 }
 
-func (m *{{ .Pascal }}Module) RegisterRoutes(r chi.Router) {
-	r.Route("/{{ .Name }}s", func(r chi.Router) {
-		r.Get("/{id}", m.handler.GetByID)
-	})
+// RegisterRoutes exposes the module's HTTP routes.
+func (m *Module) RegisterRoutes(r fw.Router) {
+	r.Group("/{{ .Name }}s").Get("/{id}", m.handler.GetByID)
 }
 
-func (m *{{ .Pascal }}Module) Close() error { return nil }
+// Health reports whether the module is ready.
+func (m *Module) Health(_ context.Context) error { return nil }
+
+// Close releases resources owned by the module.
+func (m *Module) Close() error { return nil }
 `

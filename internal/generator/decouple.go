@@ -1,12 +1,14 @@
 package generator
 
 import (
-	"bufio"
 	"fmt"
-	"io"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
-	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -17,6 +19,7 @@ type decoupleData struct {
 	Port        string // e.g. ":8081"
 	ExposedPort string // e.g. "8081"
 	GoVersion   string // e.g. "1.25.2"
+	Router      string // chi or gin
 }
 
 type clientData struct {
@@ -26,13 +29,16 @@ type clientData struct {
 }
 
 // DecoupleModule generates a new standalone project for the target module.
-func DecoupleModule(name, modPath, output, port, transport string) error {
+func DecoupleModule(name, modPath, output, port, transport, router, localFWPath string) error {
+	if err := validateRouter(router); err != nil {
+		return err
+	}
+
 	// 1. Verify source module exists
-	srcModulePath := filepath.Join("internal", "modules", name, "module.go")
-	if _, err := os.Stat(srcModulePath); os.IsNotExist(err) {
+	if _, err := findModuleFile(name); err != nil {
 		return fmt.Errorf(
-			"module %q not found: expected %s to exist\nRun 'fw generate module %s' first",
-			name, srcModulePath, name,
+			"module %q not found: expected %s_module.go\nRun 'fw generate module %s' first",
+			name, name, name,
 		)
 	}
 
@@ -55,6 +61,7 @@ func DecoupleModule(name, modPath, output, port, transport string) error {
 		Port:        port,
 		ExposedPort: strings.TrimPrefix(port, ":"),
 		GoVersion:   goVersion,
+		Router:      router,
 	}
 
 	// 4. Restructure module files into a flat internal/ layout with rewritten imports
@@ -65,10 +72,12 @@ func DecoupleModule(name, modPath, output, port, transport string) error {
 
 	// 5. Generate client scaffolds for each dependency
 	for _, dep := range deps {
-		methods, err := extractMethods(filepath.Join("internal", "modules", dep, "service", dep+"_service.go"))
+		var methods []string
+		servicePath, err := findServiceFile(dep)
 		if err != nil {
+			fmt.Printf("  warn   could not find service for %s: %v\n", dep, err)
+		} else if methods, err = extractMethods(servicePath); err != nil {
 			fmt.Printf("  warn   could not extract methods for %s: %v\n", dep, err)
-			methods = []string{}
 		}
 
 		cd := clientData{
@@ -111,12 +120,9 @@ func DecoupleModule(name, modPath, output, port, transport string) error {
 	if err := writeGoMod(output, data.ModuleName, data.GoVersion); err != nil {
 		return err
 	}
-
-	// Copy config.yaml if present
-	if _, err := os.Stat("config.yaml"); err == nil {
-		fmt.Printf("  copy   config.yaml\n")
-		if err := copyFile("config.yaml", filepath.Join(output, "config.yaml")); err != nil {
-			return fmt.Errorf("failed to copy config.yaml: %w", err)
+	if localFWPath != "" {
+		if err := addLocalReplacements(output, router, localFWPath); err != nil {
+			return err
 		}
 	}
 
@@ -139,13 +145,40 @@ func DecoupleModule(name, modPath, output, port, transport string) error {
 	return nil
 }
 
-// detectDeps scans all .go files under internal/modules/<name>/ for imports
-// matching <modPath>/internal/modules/*/. Returns unique dependency names.
-func detectDeps(name, modPath string) ([]string, error) {
-	pattern := regexp.MustCompile(`"` + regexp.QuoteMeta(modPath) + `/internal/modules/(\w+)/`)
+func findModuleFile(name string) (string, error) {
+	base := filepath.Join("internal", "modules", name)
+	candidates := []string{
+		filepath.Join(base, name+"_module.go"),
+		filepath.Join(base, "module.go"),
+	}
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+	return "", os.ErrNotExist
+}
 
+func findServiceFile(name string) (string, error) {
+	base := filepath.Join("internal", "modules", name)
+	candidates := []string{
+		filepath.Join(base, name+"_service.go"),
+		filepath.Join(base, "service", name+"_service.go"),
+	}
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+	return "", os.ErrNotExist
+}
+
+// detectDeps scans all .go files under internal/modules/<name>/ for imports
+// rooted at <modPath>/internal/modules. It supports flat and nested modules.
+func detectDeps(name, modPath string) ([]string, error) {
 	seen := map[string]bool{}
 	var deps []string
+	importPrefix := modPath + "/internal/modules/"
 
 	dir := filepath.Join("internal", "modules", name)
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -153,13 +186,18 @@ func detectDeps(name, modPath string) ([]string, error) {
 			return err
 		}
 
-		content, err := os.ReadFile(path)
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
 		if err != nil {
-			return err
+			return fmt.Errorf("parse imports from %s: %w", path, err)
 		}
 
-		for _, match := range pattern.FindAllStringSubmatch(string(content), -1) {
-			dep := match[1]
+		for _, spec := range file.Imports {
+			importPath, err := strconv.Unquote(spec.Path.Value)
+			if err != nil || !strings.HasPrefix(importPath, importPrefix) {
+				continue
+			}
+			remainder := strings.TrimPrefix(importPath, importPrefix)
+			dep, _, _ := strings.Cut(remainder, "/")
 			if dep != name && !seen[dep] {
 				seen[dep] = true
 				deps = append(deps, dep)
@@ -168,33 +206,44 @@ func detectDeps(name, modPath string) ([]string, error) {
 		return nil
 	})
 
+	sort.Strings(deps)
 	return deps, err
 }
 
-// extractMethods reads a service Go file and extracts exported method names.
+// extractMethods returns exported business methods declared on a service type.
 func extractMethods(path string) ([]string, error) {
-	f, err := os.Open(path)
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 	if err != nil {
 		return nil, err
 	}
 
-	defer func() {
-		if err := f.Close(); err != nil {
-			fmt.Printf("failed to close file")
-		}
-	}()
-
-	pattern := regexp.MustCompile(`^func \(\w+ \*\w+\) ([A-Z]\w+)\(`)
-
 	var methods []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		if m := pattern.FindStringSubmatch(scanner.Text()); m != nil {
-			methods = append(methods, m[1])
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil || !fn.Name.IsExported() {
+			continue
+		}
+		if fn.Name.Name == "Name" || fn.Name.Name == "Close" {
+			continue
+		}
+		receiver := receiverName(fn.Recv.List[0].Type)
+		if receiver == "Service" || strings.HasSuffix(receiver, "Service") {
+			methods = append(methods, fn.Name.Name)
 		}
 	}
 
-	return methods, scanner.Err()
+	return methods, nil
+}
+
+func receiverName(expr ast.Expr) string {
+	switch value := expr.(type) {
+	case *ast.Ident:
+		return value.Name
+	case *ast.StarExpr:
+		return receiverName(value.X)
+	default:
+		return ""
+	}
 }
 
 // detectGoVersion reads the go version from the current project's go.mod.
@@ -222,22 +271,12 @@ func writeGoMod(output, moduleName, goVersion string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
-// restructureModule copies a module's files from the nested monolith layout
-// (internal/modules/<name>/<subpkg>/) into a flat layout (<output>/internal/<subpkg>/)
-// and rewrites intra-module import paths to use the new standalone module name.
+// restructureModule copies a module into the standalone service's internal
+// package and rewrites imports rooted at the original module path.
 func restructureModule(name, modPath, moduleName, output string) error {
 	srcBase := filepath.Join("internal", "modules", name)
-
-	// Build a replacer that rewrites internal subpackage imports.
-	// e.g. "github.com/you/app/internal/modules/order/domain" → "order-service/internal/domain"
-	subpkgs := []string{"domain", "service", "repo", "api", "transform"}
-	pairs := make([]string, 0, len(subpkgs)*2)
-	for _, pkg := range subpkgs {
-		old := fmt.Sprintf(`"%s/internal/modules/%s/%s"`, modPath, name, pkg)
-		new := fmt.Sprintf(`"%s/internal/%s"`, moduleName, pkg)
-		pairs = append(pairs, old, new)
-	}
-	replacer := strings.NewReplacer(pairs...)
+	oldImportRoot := modPath + "/internal/modules/" + name
+	newImportRoot := moduleName + "/internal"
 
 	return filepath.Walk(srcBase, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") {
@@ -249,8 +288,6 @@ func restructureModule(name, modPath, moduleName, output string) error {
 			return err
 		}
 
-		// module.go → <output>/internal/module.go
-		// domain/order_domain.go → <output>/internal/domain/order_domain.go
 		dst := filepath.Join(output, "internal", rel)
 
 		content, err := os.ReadFile(path)
@@ -258,42 +295,13 @@ func restructureModule(name, modPath, moduleName, output string) error {
 			return err
 		}
 
-		rewritten := replacer.Replace(string(content))
+		rewritten := strings.ReplaceAll(string(content), oldImportRoot, newImportRoot)
 
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
 		return os.WriteFile(dst, []byte(rewritten), 0o644)
 	})
-}
-
-// copyFile copies a single file from src to dst.
-func copyFile(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := in.Close(); err != nil {
-			fmt.Printf("failed to close input file")
-		}
-	}()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := out.Close(); err != nil {
-			fmt.Printf("failed to close output file")
-		}
-	}()
-
-	_, err = io.Copy(out, in)
-	return err
 }
 
 // --- Templates ---
@@ -304,15 +312,28 @@ import (
 	"log"
 
 	"github.com/charlesonunze/fw"
+	{{- if eq .Router "chi" }}
+	fwrouter "github.com/charlesonunze/fw/adapters/chi"
+	"github.com/go-chi/chi/v5"
+	{{- else }}
+	fwrouter "github.com/charlesonunze/fw/adapters/gin"
+	"github.com/gin-gonic/gin"
+	{{- end }}
 	{{ .Name }} "{{ .ModuleName }}/internal"
 )
 
 func main() {
+	{{- if eq .Router "chi" }}
+	router := chi.NewRouter()
+	{{- else }}
+	router := gin.New()
+	{{- end }}
 	app := fw.New(
 		fw.WithAddr("{{ .Port }}"),
+		fw.WithRouter(fwrouter.NewRouter(router)),
 	)
 
-	app.Register(
+	app.RegisterModules(
 		{{ .Name }}.New(),
 	)
 
@@ -334,7 +355,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/{{ .Name }} ./cmd/
 FROM alpine:3.20
 WORKDIR /app
 COPY --from=builder /bin/{{ .Name }} /bin/{{ .Name }}
-COPY config.yaml ./
 EXPOSE {{ .ExposedPort }}
 ENTRYPOINT ["/bin/{{ .Name }}"]
 `
@@ -378,6 +398,7 @@ import (
 	"context"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // {{ .DepPascal }}Service is the interface for calling the {{ .DepName }} service remotely.
@@ -396,7 +417,7 @@ type GRPCClient struct {
 // New creates a new GRPCClient connected to the given address.
 // Example: New("user-service:50051")
 func New(addr string) (*GRPCClient, error) {
-	conn, err := grpc.Dial(addr, grpc.WithInsecure()) //nolint:staticcheck
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}

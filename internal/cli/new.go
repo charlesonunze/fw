@@ -12,8 +12,9 @@ import (
 )
 
 var (
-	modulePath string
-	localFw    string
+	modulePath    string
+	localFw       string
+	projectRouter string
 )
 
 var newCmd = &cobra.Command{
@@ -38,12 +39,13 @@ var newCmd = &cobra.Command{
 			return fmt.Errorf("module path is required")
 		}
 
-		return generator.NewProject(projectName, modulePath, localFw)
+		return generator.NewProject(projectName, modulePath, projectRouter, localFw)
 	},
 }
 
 func init() {
 	newCmd.Flags().StringVar(&modulePath, "module", "", "Go module path (e.g. github.com/you/myapp)")
+	newCmd.Flags().StringVar(&projectRouter, "router", generator.DefaultRouter, "HTTP router adapter: chi or gin")
 	newCmd.Flags().StringVar(&localFw, "local", "", "Path to local fw framework (adds replace directive in go.mod)")
 	rootCmd.AddCommand(newCmd)
 }
