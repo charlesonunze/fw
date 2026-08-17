@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  ci:
-    name: Vet, Format, Build, Test
+  format:
+    name: Check Formatting
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,9 +17,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: go vet
-        run: go vet ./...
 
       - name: Check formatting
         run: |
@@ -30,8 +27,36 @@ jobs:
             exit 1
           fi
 
+  modules:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Framework
+            directory: .
+          - name: Chi Adapter
+            directory: adapters/chi
+          - name: Gin Adapter
+            directory: adapters/gin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.directory }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ matrix.directory }}/go.sum
+
+      - name: Vet
+        working-directory: ${{ matrix.directory }}
+        run: go vet ./...
+
       - name: Build
+        working-directory: ${{ matrix.directory }}
         run: go build ./...
 
       - name: Test
+        working-directory: ${{ matrix.directory }}
         run: go test -race -count=1 ./...

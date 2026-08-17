@@ -3,7 +3,7 @@ module github.com/charlesonunze/fw/adapters/chi
 go 1.25.2
 
 require (
-	github.com/charlesonunze/fw v0.0.0
+	github.com/charlesonunze/fw v0.2.0
 	github.com/go-chi/chi/v5 v5.2.5
 )
 
