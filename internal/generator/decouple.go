@@ -114,6 +114,9 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 			return err
 		}
 	}
+	if err := writeDevelopmentFiles(output); err != nil {
+		return err
+	}
 
 	// Write go.mod (not a template — content is built dynamically)
 	fmt.Printf("  create go.mod\n")
@@ -139,7 +142,7 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 		base++
 	}
 	fmt.Printf("  %d. cd %s && go mod tidy && go build ./...\n\n", base, output)
-	fmt.Printf("  Run standalone:  go run ./cmd/\n")
+	fmt.Printf("  Run standalone:  fw dev\n")
 	fmt.Printf("  Build image:     docker build -t %s .\n\n", data.ModuleName)
 
 	return nil

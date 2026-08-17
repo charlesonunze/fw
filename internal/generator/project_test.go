@@ -85,6 +85,7 @@ func TestNewProjectCompiles(t *testing.T) {
 			}
 
 			t.Chdir(filepath.Join(workspace, project))
+			assertDevelopmentFiles(t, ".")
 			if err := NewModule("user", "example.com/"+project); err != nil {
 				t.Fatalf("NewModule() error = %v", err)
 			}
