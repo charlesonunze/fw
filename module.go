@@ -28,5 +28,6 @@ type Module interface {
 	Health(ctx context.Context) error
 
 	// Close gracefully shuts down the module and releases resources.
+	// It must be safe to call after Init returns an error.
 	Close() error
 }
