@@ -17,15 +17,16 @@ import (
 // App is the application container that manages modules, services,
 // and the HTTP and gRPC servers.
 type App struct {
-	modules       []Module
-	preRegistered []Service
-	middleware    []func(http.Handler) http.Handler
-	router        Router
-	grpcServer    *grpc.Server
-	logger        Logger
-	services      *ServiceRegistry
-	httpAddr      string
-	grpcAddr      string
+	modules            []Module
+	initializedModules []Module
+	preRegistered      []Service
+	middleware         []func(http.Handler) http.Handler
+	router             Router
+	grpcServer         *grpc.Server
+	logger             Logger
+	services           *ServiceRegistry
+	httpAddr           string
+	grpcAddr           string
 }
 
 // Option configures the App.
@@ -96,6 +97,9 @@ func (a *App) RegisterModules(modules ...Module) {
 // Start initializes all services and modules, starts the HTTP server
 // (and optionally a gRPC server), and blocks until a shutdown signal is received.
 func (a *App) Start() error {
+	a.ensureLogger()
+	defer a.closeResources()
+
 	a.setup()
 
 	deps := &Deps{
@@ -116,12 +120,16 @@ func (a *App) Start() error {
 	return a.serve()
 }
 
-// setup initialises shared state before modules are wired.
-func (a *App) setup() {
+func (a *App) ensureLogger() {
 	if a.logger == nil {
 		a.logger = newDefaultLogger("info")
 	}
+}
+
+// setup initialises shared state before modules are wired.
+func (a *App) setup() {
 	a.services = NewServiceRegistry()
+	a.initializedModules = nil
 	for _, svc := range a.preRegistered {
 		a.services.Register(svc)
 	}
@@ -136,8 +144,12 @@ func (a *App) initModules(deps *Deps) error {
 	for _, mod := range a.modules {
 		a.logger.Info("initializing module", "module", mod.Name())
 		if err := mod.Init(deps); err != nil {
+			if closeErr := mod.Close(); closeErr != nil {
+				a.logger.Error("module close error", "module", mod.Name(), "error", closeErr)
+			}
 			return fmt.Errorf("fw: failed to initialize module %q: %w", mod.Name(), err)
 		}
+		a.initializedModules = append(a.initializedModules, mod)
 	}
 	return nil
 }
@@ -182,6 +194,7 @@ func (a *App) serve() error {
 		Addr:    a.httpAddr,
 		Handler: a.router,
 	}
+	defer a.shutdownServers(httpServer)
 
 	errCh := make(chan error, 2)
 
@@ -207,7 +220,7 @@ func (a *App) serve() error {
 		}()
 	}
 
-	return a.waitForShutdown(httpServer, errCh)
+	return a.waitForShutdown(errCh)
 }
 
 // livenessHandler always returns 200 — the process is alive.
@@ -257,17 +270,21 @@ func (a *App) readinessHandler() http.HandlerFunc {
 	}
 }
 
-func (a *App) waitForShutdown(httpServer *http.Server, errCh chan error) error {
+func (a *App) waitForShutdown(errCh chan error) error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(quit)
 
 	select {
 	case err := <-errCh:
 		return err
 	case sig := <-quit:
 		a.logger.Info("shutdown signal received", "signal", sig.String())
+		return nil
 	}
+}
 
+func (a *App) shutdownServers(httpServer *http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -289,15 +306,19 @@ func (a *App) waitForShutdown(httpServer *http.Server, errCh chan error) error {
 			a.grpcServer.Stop()
 		}
 	}
+}
 
-	for _, mod := range a.modules {
+func (a *App) closeResources() {
+	for i := len(a.initializedModules) - 1; i >= 0; i-- {
+		mod := a.initializedModules[i]
 		a.logger.Info("closing module", "module", mod.Name())
 		if err := mod.Close(); err != nil {
 			a.logger.Error("module close error", "module", mod.Name(), "error", err)
 		}
 	}
 
-	for _, svc := range a.preRegistered {
+	for i := len(a.preRegistered) - 1; i >= 0; i-- {
+		svc := a.preRegistered[i]
 		a.logger.Info("closing service", "service", svc.Name())
 		if err := svc.Close(); err != nil {
 			a.logger.Error("service close error", "service", svc.Name(), "error", err)
@@ -305,5 +326,4 @@ func (a *App) waitForShutdown(httpServer *http.Server, errCh chan error) error {
 	}
 
 	a.logger.Info("shutdown complete")
-	return nil
 }
