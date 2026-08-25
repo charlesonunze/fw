@@ -51,6 +51,13 @@ func TestGRPCHealthAggregatesModules(t *testing.T) {
 	if response.GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING {
 		t.Fatalf("Check() status = %s, want SERVING", response.GetStatus())
 	}
+	list, err := client.List(context.Background(), &grpc_health_v1.HealthListRequest{})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list.GetStatuses()) != 1 || list.GetStatuses()[""].GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING {
+		t.Fatalf("List() statuses = %+v, want only overall SERVING status", list.GetStatuses())
+	}
 
 	module.healthErr = errors.New("database unavailable")
 	response, err = client.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{})
@@ -64,6 +71,15 @@ func TestGRPCHealthAggregatesModules(t *testing.T) {
 	_, err = client.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{Service: "unknown"})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("unknown service code = %s, want NotFound", status.Code(err))
+	}
+
+	watch, err := client.Watch(context.Background(), &grpc_health_v1.HealthCheckRequest{})
+	if err != nil {
+		t.Fatalf("Watch() error = %v", err)
+	}
+	_, err = watch.Recv()
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("Watch().Recv() code = %s, want Unimplemented", status.Code(err))
 	}
 }
 
