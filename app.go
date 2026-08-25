@@ -21,12 +21,11 @@ type App struct {
 	initializedModules []Module
 	preRegistered      []Service
 	middleware         []func(http.Handler) http.Handler
-	router             Router
+	httpConfig         *HTTPConfig
+	grpcConfig         *GRPCConfig
 	grpcServer         *grpc.Server
 	logger             Logger
 	services           *ServiceRegistry
-	httpAddr           string
-	grpcAddr           string
 }
 
 // Option configures the App.
@@ -34,38 +33,21 @@ type OptionsFunc func(*App)
 
 // New creates a new App with the given options.
 func New(opts ...OptionsFunc) *App {
-	a := &App{
-		httpAddr: ":8888",
-		grpcAddr: ":9999",
-	}
+	a := &App{}
 	for _, opt := range opts {
 		opt(a)
 	}
 	return a
 }
 
-// WithAddr sets the HTTP server listen address. Default: ":8888".
-func WithAddr(addr string) OptionsFunc {
-	return func(a *App) { a.httpAddr = addr }
+// WithHTTP enables and configures the HTTP transport.
+func WithHTTP(config HTTPConfig) OptionsFunc {
+	return func(a *App) { a.httpConfig = &config }
 }
 
-// WithGRPCAddr sets the gRPC server listen address. Default: ":9999".
-// Set to "-" to disable gRPC entirely.
-func WithGRPCAddr(addr string) OptionsFunc {
-	return func(a *App) { a.grpcAddr = addr }
-}
-
-// WithRouter sets the router. Required — use an adapter from fw/adapters/chi or fw/adapters/gin.
-func WithRouter(r Router) OptionsFunc {
-	return func(a *App) { a.router = r }
-}
-
-// WithGRPCServer sets a pre-configured gRPC server.
-// Use this to supply interceptors, TLS credentials, keepalive options, etc.
-// If not set and at least one module implements GRPCModule, fw creates a
-// plain grpc.NewServer().
-func WithGRPCServer(s *grpc.Server) OptionsFunc {
-	return func(a *App) { a.grpcServer = s }
+// WithGRPC enables and configures the gRPC transport.
+func WithGRPC(config GRPCConfig) OptionsFunc {
+	return func(a *App) { a.grpcConfig = &config }
 }
 
 // WithLogger sets a custom logger implementation.
@@ -74,7 +56,7 @@ func WithLogger(l Logger) OptionsFunc {
 	return func(a *App) { a.logger = l }
 }
 
-// Use registers global HTTP middleware applied to every route.
+// Use registers global HTTP middleware applied to every route when HTTP is configured.
 // Must be called before Start().
 func (a *App) Use(middleware ...func(http.Handler) http.Handler) {
 	a.middleware = append(a.middleware, middleware...)
@@ -88,19 +70,23 @@ func (a *App) RegisterService(svc Service) {
 }
 
 // RegisterModules adds modules to the app.
-// Registration order does not matter — services are resolved lazily at call time,
-// not during Init.
+// Init is called in registration order. Cross-module dependencies must be
+// resolved after all modules have initialized, such as during route registration
+// or lazily inside service methods, if registration order should not matter.
 func (a *App) RegisterModules(modules ...Module) {
 	a.modules = append(a.modules, modules...)
 }
 
-// Start initializes all services and modules, starts the HTTP server
-// (and optionally a gRPC server), and blocks until a shutdown signal is received.
+// Start initializes all services and modules, starts the configured transports,
+// and blocks until a shutdown signal is received. With no transports configured,
+// Start runs as a worker-only application.
 func (a *App) Start() error {
 	a.ensureLogger()
 	defer a.closeResources()
 
-	a.setup()
+	if err := a.setup(); err != nil {
+		return err
+	}
 
 	deps := &Deps{
 		Logger:   a.logger,
@@ -127,16 +113,25 @@ func (a *App) ensureLogger() {
 }
 
 // setup initialises shared state before modules are wired.
-func (a *App) setup() {
+func (a *App) setup() error {
 	a.services = NewServiceRegistry()
 	a.initializedModules = nil
 	for _, svc := range a.preRegistered {
 		a.services.Register(svc)
 	}
-	if a.router == nil {
-		panic("fw: no router configured — use fw.WithRouter() with an adapter from fw/adapters/chi or fw/adapters/gin")
+	if a.httpConfig != nil {
+		if a.httpConfig.Router == nil {
+			return fmt.Errorf("fw: HTTP transport requires a router")
+		}
+		if a.httpConfig.Addr == "" {
+			a.httpConfig.Addr = defaultHTTPAddr
+		}
+		a.httpConfig.Router.Use(a.middleware...)
 	}
-	a.router.Use(a.middleware...)
+	if a.grpcConfig != nil && a.grpcConfig.Addr == "" {
+		a.grpcConfig.Addr = defaultGRPCAddr
+	}
+	return nil
 }
 
 // initModules calls Init on every registered module.
@@ -156,63 +151,62 @@ func (a *App) initModules(deps *Deps) error {
 
 // registerRoutes mounts HTTP routes and health endpoints.
 func (a *App) registerRoutes() {
+	if a.httpConfig == nil {
+		return
+	}
+	router := a.httpConfig.Router
 	for _, mod := range a.modules {
 		if hm, ok := mod.(HTTPModule); ok {
-			hm.RegisterRoutes(a.router)
+			hm.RegisterRoutes(router)
 		}
 	}
-	a.router.Get("/health/live", a.livenessHandler())
-	a.router.Get("/health/ready", a.readinessHandler())
+	router.Get("/health/live", a.livenessHandler())
+	router.Get("/health/ready", a.readinessHandler())
 }
 
-// buildGRPCServer wires gRPC if any modules implement GRPCModule.
+// buildGRPCServer wires modules and health into the configured gRPC server.
 func (a *App) buildGRPCServer() error {
-	if a.grpcAddr == "" || a.grpcAddr == "-" {
+	if a.grpcConfig == nil {
+		a.grpcServer = nil
 		return nil
 	}
-	var grpcModules []GRPCModule
-	for _, mod := range a.modules {
-		if gm, ok := mod.(GRPCModule); ok {
-			grpcModules = append(grpcModules, gm)
-		}
-	}
-	if len(grpcModules) == 0 {
-		return nil
-	}
+	a.grpcServer = a.grpcConfig.Server
 	if a.grpcServer == nil {
 		a.grpcServer = grpc.NewServer()
 	}
-	for _, gm := range grpcModules {
-		gm.RegisterGRPC(a.grpcServer)
+	for _, mod := range a.modules {
+		if gm, ok := mod.(GRPCModule); ok {
+			gm.RegisterGRPC(a.grpcServer)
+		}
 	}
+	a.registerGRPCHealth()
 	return nil
 }
 
-// serve starts the HTTP (and optionally gRPC) server and blocks.
+// serve starts configured transports and blocks.
 func (a *App) serve() error {
-	httpServer := &http.Server{
-		Addr:    a.httpAddr,
-		Handler: a.router,
-	}
+	httpServer := a.buildHTTPServer()
 	defer a.shutdownServers(httpServer)
 
 	errCh := make(chan error, 2)
 
-	go func() {
-		a.logger.Info("starting http server", "addr", a.httpAddr)
-		err := httpServer.ListenAndServe()
-		if err != nil && err != http.ErrServerClosed {
-			errCh <- fmt.Errorf("fw: http server error: %w", err)
-		}
-	}()
+	if httpServer != nil {
+		go func() {
+			a.logger.Info("starting http server", "addr", a.httpConfig.Addr)
+			err := httpServer.ListenAndServe()
+			if err != nil && err != http.ErrServerClosed {
+				errCh <- fmt.Errorf("fw: http server error: %w", err)
+			}
+		}()
+	}
 
 	if a.grpcServer != nil {
-		lis, err := net.Listen("tcp", a.grpcAddr)
+		lis, err := net.Listen("tcp", a.grpcConfig.Addr)
 		if err != nil {
-			return fmt.Errorf("fw: failed to listen on gRPC addr %q: %w", a.grpcAddr, err)
+			return fmt.Errorf("fw: failed to listen on gRPC addr %q: %w", a.grpcConfig.Addr, err)
 		}
 		go func() {
-			a.logger.Info("starting grpc server", "addr", a.grpcAddr)
+			a.logger.Info("starting grpc server", "addr", a.grpcConfig.Addr)
 			err := a.grpcServer.Serve(lis)
 			if err != nil {
 				errCh <- fmt.Errorf("fw: grpc server error: %w", err)
@@ -221,6 +215,19 @@ func (a *App) serve() error {
 	}
 
 	return a.waitForShutdown(errCh)
+}
+
+func (a *App) buildHTTPServer() *http.Server {
+	if a.httpConfig == nil {
+		return nil
+	}
+	server := a.httpConfig.Server
+	if server == nil {
+		server = &http.Server{}
+	}
+	server.Addr = a.httpConfig.Addr
+	server.Handler = a.httpConfig.Router
+	return server
 }
 
 // livenessHandler always returns 200 — the process is alive.
@@ -288,8 +295,10 @@ func (a *App) shutdownServers(httpServer *http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := httpServer.Shutdown(ctx); err != nil {
-		a.logger.Error("HTTP server shutdown error", "error", err)
+	if httpServer != nil {
+		if err := httpServer.Shutdown(ctx); err != nil {
+			a.logger.Error("HTTP server shutdown error", "error", err)
+		}
 	}
 
 	if a.grpcServer != nil {

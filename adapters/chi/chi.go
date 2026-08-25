@@ -6,7 +6,7 @@
 //
 //	r := chi.NewRouter()
 //	r.Use(otelchi.Middleware("my-service"))
-//	app := fw.New(fw.WithRouter(fwchi.NewRouter(r)))
+//	app := fw.New(fw.WithHTTP(fw.HTTPConfig{Router: fwchi.NewRouter(r)}))
 package chi
 
 import (

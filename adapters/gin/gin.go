@@ -5,7 +5,7 @@
 //	import fwgin "github.com/charlesonunze/fw/adapters/gin"
 //
 //	e := gin.Default()
-//	app := fw.New(fw.WithRouter(fwgin.NewRouter(e)))
+//	app := fw.New(fw.WithHTTP(fw.HTTPConfig{Router: fwgin.NewRouter(e)}))
 package gin
 
 import (

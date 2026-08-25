@@ -20,6 +20,7 @@ type decoupleData struct {
 	ExposedPort string // e.g. "8081"
 	GoVersion   string // e.g. "1.25.2"
 	Router      string // chi or gin
+	Transport   string // http or grpc
 }
 
 type clientData struct {
@@ -30,15 +31,39 @@ type clientData struct {
 
 // DecoupleModule generates a new standalone project for the target module.
 func DecoupleModule(name, modPath, output, port, transport, router, localFWPath string) error {
-	if err := validateRouter(router); err != nil {
-		return err
+	if transport != "http" && transport != "grpc" {
+		return fmt.Errorf("unsupported transport %q: use http or grpc", transport)
+	}
+	if transport == "http" {
+		if err := validateRouter(router); err != nil {
+			return err
+		}
 	}
 
-	// 1. Verify source module exists
+	// 1. Verify source module exists and supports the selected transport.
 	if _, err := findModuleFile(name); err != nil {
 		return fmt.Errorf(
 			"module %q not found: expected %s_module.go\nRun 'fw generate module %s' first",
 			name, name, name,
+		)
+	}
+	supported, err := moduleSupportsTransport(name, transport)
+	if err != nil {
+		return fmt.Errorf("inspect module transport: %w", err)
+	}
+	if !supported {
+		interfaceName := "HTTPModule"
+		methodName := "RegisterRoutes"
+		if transport == "grpc" {
+			interfaceName = "GRPCModule"
+			methodName = "RegisterGRPC"
+		}
+		return fmt.Errorf(
+			"module %q does not implement fw.%s: add %s before decoupling with --transport %s",
+			name,
+			interfaceName,
+			methodName,
+			transport,
 		)
 	}
 
@@ -62,6 +87,7 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 		ExposedPort: strings.TrimPrefix(port, ":"),
 		GoVersion:   goVersion,
 		Router:      router,
+		Transport:   transport,
 	}
 
 	// 4. Restructure module files into a flat internal/ layout with rewritten imports
@@ -124,7 +150,11 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 		return err
 	}
 	if localFWPath != "" {
-		if err := addLocalReplacements(output, router, localFWPath); err != nil {
+		replacementRouter := router
+		if transport == "grpc" {
+			replacementRouter = ""
+		}
+		if err := addLocalReplacements(output, replacementRouter, localFWPath); err != nil {
 			return err
 		}
 	}
@@ -174,6 +204,98 @@ func findServiceFile(name string) (string, error) {
 		}
 	}
 	return "", os.ErrNotExist
+}
+
+func moduleSupportsTransport(name, transport string) (bool, error) {
+	methodName := "RegisterRoutes"
+	if transport == "grpc" {
+		methodName = "RegisterGRPC"
+	}
+
+	dir := filepath.Join("internal", "modules", name)
+	moduleType := ""
+	supportedReceivers := make(map[string]bool)
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+		imports := importAliases(file)
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			if function.Recv == nil && function.Name.Name == "New" && fieldCount(function.Type.Params) == 0 && fieldCount(function.Type.Results) == 1 {
+				moduleType = receiverName(function.Type.Results.List[0].Type)
+				continue
+			}
+			if function.Recv != nil && function.Name.Name == methodName && validTransportMethod(function.Type, imports, transport) {
+				receiver := receiverName(function.Recv.List[0].Type)
+				supportedReceivers[receiver] = true
+			}
+		}
+		return nil
+	})
+	return moduleType != "" && supportedReceivers[moduleType], err
+}
+
+func validTransportMethod(function *ast.FuncType, imports map[string]string, transport string) bool {
+	if fieldCount(function.Params) != 1 || fieldCount(function.Results) != 0 {
+		return false
+	}
+	parameter := function.Params.List[0].Type
+	wantImport := "github.com/charlesonunze/fw"
+	wantType := "Router"
+	if transport == "grpc" {
+		pointer, ok := parameter.(*ast.StarExpr)
+		if !ok {
+			return false
+		}
+		parameter = pointer.X
+		wantImport = "google.golang.org/grpc"
+		wantType = "Server"
+	}
+	selector, ok := parameter.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != wantType {
+		return false
+	}
+	alias, ok := selector.X.(*ast.Ident)
+	return ok && imports[alias.Name] == wantImport
+}
+
+func fieldCount(fields *ast.FieldList) int {
+	if fields == nil {
+		return 0
+	}
+	count := 0
+	for _, field := range fields.List {
+		if len(field.Names) == 0 {
+			count++
+		} else {
+			count += len(field.Names)
+		}
+	}
+	return count
+}
+
+func importAliases(file *ast.File) map[string]string {
+	aliases := make(map[string]string)
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			continue
+		}
+		alias := filepath.Base(importPath)
+		if spec.Name != nil {
+			alias = spec.Name.Name
+		}
+		aliases[alias] = importPath
+	}
+	return aliases
 }
 
 // detectDeps scans all .go files under internal/modules/<name>/ for imports
@@ -315,6 +437,7 @@ import (
 	"log"
 
 	"github.com/charlesonunze/fw"
+	{{- if eq .Transport "http" }}
 	{{- if eq .Router "chi" }}
 	fwrouter "github.com/charlesonunze/fw/adapters/chi"
 	"github.com/go-chi/chi/v5"
@@ -322,22 +445,37 @@ import (
 	fwrouter "github.com/charlesonunze/fw/adapters/gin"
 	"github.com/gin-gonic/gin"
 	{{- end }}
+	{{- end }}
 	{{ .Name }} "{{ .ModuleName }}/internal"
 )
 
 func main() {
+	{{- if eq .Transport "http" }}
 	{{- if eq .Router "chi" }}
 	router := chi.NewRouter()
 	{{- else }}
 	router := gin.New()
 	{{- end }}
 	app := fw.New(
-		fw.WithAddr("{{ .Port }}"),
-		fw.WithRouter(fwrouter.NewRouter(router)),
+		fw.WithHTTP(fw.HTTPConfig{
+			Addr:   "{{ .Port }}",
+			Router: fwrouter.NewRouter(router),
+		}),
 	)
+	{{- else }}
+	app := fw.New(
+		fw.WithGRPC(fw.GRPCConfig{Addr: "{{ .Port }}"}),
+	)
+	{{- end }}
+	module := {{ .Name }}.New()
+	{{- if eq .Transport "http" }}
+	var _ fw.HTTPModule = module
+	{{- else }}
+	var _ fw.GRPCModule = module
+	{{- end }}
 
 	app.RegisterModules(
-		{{ .Name }}.New(),
+		module,
 	)
 
 	if err := app.Start(); err != nil {

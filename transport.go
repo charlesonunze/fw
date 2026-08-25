@@ -1,17 +1,43 @@
 package fw
 
-import "google.golang.org/grpc"
+import (
+	"net/http"
+
+	"google.golang.org/grpc"
+)
+
+const (
+	defaultHTTPAddr = ":8888"
+	defaultGRPCAddr = ":9999"
+)
+
+// HTTPConfig enables and configures the HTTP transport.
+// Router is required. Addr defaults to ":8888".
+// When Server is provided, fw owns its lifecycle and sets its Addr and Handler.
+type HTTPConfig struct {
+	Addr   string
+	Router Router
+	Server *http.Server
+}
+
+// GRPCConfig enables and configures the gRPC transport.
+// Addr defaults to ":9999". When Server is nil, fw creates one.
+// A provided Server remains configurable with interceptors, TLS, and keepalive options.
+type GRPCConfig struct {
+	Addr   string
+	Server *grpc.Server
+}
 
 // HTTPModule is implemented by modules that expose an HTTP API.
-// fw calls RegisterRoutes on every module that implements this interface.
+// When HTTP is configured, fw calls RegisterRoutes on every module that
+// implements this interface before starting the shared server.
 type HTTPModule interface {
 	RegisterRoutes(r Router)
 }
 
 // GRPCModule is implemented by modules that expose a gRPC API.
-// fw starts a shared gRPC server and calls RegisterGRPC on every module
-// that implements this interface. The gRPC server is only started if at
-// least one registered module implements GRPCModule.
+// When gRPC is configured, fw calls RegisterGRPC on every module that
+// implements this interface before starting the shared server.
 type GRPCModule interface {
 	RegisterGRPC(s *grpc.Server)
 }
