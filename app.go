@@ -50,51 +50,6 @@ func WithGRPC(config GRPCConfig) OptionsFunc {
 	return func(a *App) { a.grpcConfig = &config }
 }
 
-// WithAddr sets the HTTP server listen address and enables HTTP.
-// Deprecated: use WithHTTP with HTTPConfig.
-func WithAddr(addr string) OptionsFunc {
-	return func(a *App) { a.ensureHTTPConfig().Addr = addr }
-}
-
-// WithGRPCAddr sets the gRPC server listen address and enables gRPC.
-// Deprecated: use WithGRPC with GRPCConfig.
-func WithGRPCAddr(addr string) OptionsFunc {
-	return func(a *App) {
-		if addr == "" || addr == "-" {
-			a.grpcConfig = nil
-			return
-		}
-		a.ensureGRPCConfig().Addr = addr
-	}
-}
-
-// WithRouter sets the router and enables HTTP.
-// Deprecated: use WithHTTP with HTTPConfig.
-func WithRouter(r Router) OptionsFunc {
-	return func(a *App) { a.ensureHTTPConfig().Router = r }
-}
-
-// WithGRPCServer sets a pre-configured gRPC server.
-// Use this to supply interceptors, TLS credentials, keepalive options, etc.
-// Deprecated: use WithGRPC with GRPCConfig.
-func WithGRPCServer(s *grpc.Server) OptionsFunc {
-	return func(a *App) { a.ensureGRPCConfig().Server = s }
-}
-
-func (a *App) ensureHTTPConfig() *HTTPConfig {
-	if a.httpConfig == nil {
-		a.httpConfig = &HTTPConfig{}
-	}
-	return a.httpConfig
-}
-
-func (a *App) ensureGRPCConfig() *GRPCConfig {
-	if a.grpcConfig == nil {
-		a.grpcConfig = &GRPCConfig{}
-	}
-	return a.grpcConfig
-}
-
 // WithLogger sets a custom logger implementation.
 // If not set, fw uses a JSON slog logger at INFO level.
 func WithLogger(l Logger) OptionsFunc {

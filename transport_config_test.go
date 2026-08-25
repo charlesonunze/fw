@@ -96,28 +96,6 @@ func TestTransportConfigurationDefaultsAndSelection(t *testing.T) {
 	})
 }
 
-func TestDeprecatedTransportOptionsPopulateConfigs(t *testing.T) {
-	router := &noopRouter{}
-	grpcServer := grpc.NewServer()
-	app := New(
-		WithAddr(":8080"),
-		WithRouter(router),
-		WithGRPCAddr(":9090"),
-		WithGRPCServer(grpcServer),
-	)
-	if app.httpConfig == nil || app.httpConfig.Addr != ":8080" || app.httpConfig.Router != router {
-		t.Fatalf("deprecated HTTP options produced config %+v", app.httpConfig)
-	}
-	if app.grpcConfig == nil || app.grpcConfig.Addr != ":9090" || app.grpcConfig.Server != grpcServer {
-		t.Fatalf("deprecated gRPC options produced config %+v", app.grpcConfig)
-	}
-
-	WithGRPCAddr("-")(app)
-	if app.grpcConfig != nil {
-		t.Fatal(`WithGRPCAddr("-") did not disable gRPC`)
-	}
-}
-
 func TestHTTPConfigRequiresRouter(t *testing.T) {
 	app := New(WithHTTP(HTTPConfig{}), WithLogger(discardLogger{}))
 	if err := app.setup(); err == nil {
