@@ -12,12 +12,14 @@ const (
 )
 
 // HTTPConfig enables and configures the HTTP transport.
-// Router is required. Addr defaults to ":8888".
+// Router is required. Addr defaults to ":8888". Middleware runs before
+// middleware registered with [App.Use].
 // When Server is provided, fw owns its lifecycle and sets its Addr and Handler.
 type HTTPConfig struct {
-	Addr   string
-	Router Router
-	Server *http.Server
+	Addr       string
+	Router     Router
+	Server     *http.Server
+	Middleware []func(http.Handler) http.Handler
 }
 
 // GRPCConfig enables and configures the gRPC transport.
