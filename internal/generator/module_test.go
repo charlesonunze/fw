@@ -57,6 +57,19 @@ func TestNewModuleCreatesFlatPrefixedPackage(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("generated files = %v, want %v", got, want)
 	}
+
+	wiring, err := os.ReadFile(filepath.Join(base, "user_module.go"))
+	if err != nil {
+		t.Fatalf("ReadFile(user_module.go) error = %v", err)
+	}
+	for _, declaration := range []string{
+		"func (m *Module) Register(deps *fw.Deps) error",
+		"func (m *Module) Init(_ *fw.Deps) error",
+	} {
+		if !strings.Contains(string(wiring), declaration) {
+			t.Errorf("generated module missing %q:\n%s", declaration, wiring)
+		}
+	}
 }
 
 func TestNewModuleRejectsExistingModule(t *testing.T) {

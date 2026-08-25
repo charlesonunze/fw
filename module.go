@@ -12,14 +12,15 @@ type Module interface {
 	// Name returns the unique module name (e.g. "user", "order").
 	Name() string
 
-	// Init initializes the module with shared app dependencies.
-	// This is where you wire your services, repos, and handlers,
-	// and register services in the registry for other modules to use.
-	//
-	// Important: do not call fw.GetService here to look up other modules'
-	// services — not all modules may be initialized yet. Resolve dependencies
-	// lazily inside your service methods, where all services are guaranteed
-	// to be registered.
+	// Register constructs and exposes the module's services. fw calls Register
+	// on every module before calling Init on any module. Application services
+	// registered with App.RegisterService are already available in deps. Resolve
+	// services owned by other modules during Init, not Register.
+	Register(deps *Deps) error
+
+	// Init resolves services exposed by other modules and completes the module's
+	// wiring. Every module service has been registered before Init is called, but
+	// another module's Init may not have run yet.
 	Init(deps *Deps) error
 
 	// Health reports whether the module is healthy.
@@ -27,7 +28,8 @@ type Module interface {
 	// Return nil if healthy, an error describing the problem if not.
 	Health(ctx context.Context) error
 
-	// Close gracefully shuts down the module and releases resources.
-	// It must be safe to call after Init returns an error.
+	// Close gracefully shuts down the module and releases resources. It must be
+	// safe to call after Register or Init returns an error, and after Register
+	// succeeds even if Init is never called.
 	Close() error
 }

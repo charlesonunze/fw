@@ -1,13 +1,14 @@
 package fw
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 )
 
 // ServiceRegistry is a thread-safe container for services.
-// Modules register services by name during Init, and other modules
-// look them up by name at call time.
+// Modules register services by name during Register, before module initialization.
 type ServiceRegistry struct {
 	mu       sync.RWMutex
 	services map[string]any
@@ -21,15 +22,38 @@ func NewServiceRegistry() *ServiceRegistry {
 }
 
 // Register adds a service to the registry using the service's Name() as the key.
-// Panics if a service with the same name is already registered.
-func (r *ServiceRegistry) Register(svc Service) {
+func (r *ServiceRegistry) Register(svc Service) error {
+	if isNilService(svc) {
+		return errors.New("cannot register a nil service")
+	}
+	name := svc.Name()
+	if name == "" {
+		return errors.New("service name cannot be empty")
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	name := svc.Name()
+	if r.services == nil {
+		r.services = make(map[string]any)
+	}
 	if _, exists := r.services[name]; exists {
-		panic(fmt.Sprintf("fw: service `%q` is already registered", name))
+		return fmt.Errorf("service %q already registered", name)
 	}
 	r.services[name] = svc
+	return nil
+}
+
+func isNilService(svc Service) bool {
+	if svc == nil {
+		return true
+	}
+	value := reflect.ValueOf(svc)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // GetService retrieves a service from the registry using the type's Name() method as the key.

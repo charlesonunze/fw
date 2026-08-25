@@ -15,6 +15,7 @@ type multiTransportModule struct {
 }
 
 func (*multiTransportModule) Name() string                   { return "multi" }
+func (*multiTransportModule) Register(*Deps) error           { return nil }
 func (*multiTransportModule) Init(*Deps) error               { return nil }
 func (m *multiTransportModule) Health(context.Context) error { return m.healthErr }
 func (*multiTransportModule) Close() error                   { return nil }

@@ -211,13 +211,16 @@ func New() *Module {
 // Name returns the module name.
 func (m *Module) Name() string { return "{{ .Name }}" }
 
-// Init wires and exposes the module's services.
-func (m *Module) Init(deps *fw.Deps) error {
+// Register constructs and exposes the module's services.
+func (m *Module) Register(deps *fw.Deps) error {
 	repo := NewMemoryRepository()
 	m.service = NewService(repo)
-	m.handler = NewHTTPHandler(m.service)
+	return deps.Services.Register(m.service)
+}
 
-	deps.Services.Register(m.service)
+// Init completes the module's internal wiring.
+func (m *Module) Init(_ *fw.Deps) error {
+	m.handler = NewHTTPHandler(m.service)
 	return nil
 }
 
@@ -230,5 +233,10 @@ func (m *Module) RegisterRoutes(r fw.Router) {
 func (m *Module) Health(_ context.Context) error { return nil }
 
 // Close releases resources owned by the module.
-func (m *Module) Close() error { return nil }
+func (m *Module) Close() error {
+	if m.service == nil {
+		return nil
+	}
+	return m.service.Close()
+}
 `

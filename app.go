@@ -17,15 +17,15 @@ import (
 // App is the application container that manages modules, services,
 // and the HTTP and gRPC servers.
 type App struct {
-	modules            []Module
-	initializedModules []Module
-	preRegistered      []Service
-	middleware         []func(http.Handler) http.Handler
-	httpConfig         *HTTPConfig
-	grpcConfig         *GRPCConfig
-	grpcServer         *grpc.Server
-	logger             Logger
-	services           *ServiceRegistry
+	modules           []Module
+	registeredModules []Module
+	preRegistered     []Service
+	middleware        []func(http.Handler) http.Handler
+	httpConfig        *HTTPConfig
+	grpcConfig        *GRPCConfig
+	grpcServer        *grpc.Server
+	logger            Logger
+	services          *ServiceRegistry
 }
 
 // Option configures the App.
@@ -33,7 +33,7 @@ type OptionsFunc func(*App)
 
 // New creates a new App with the given options.
 func New(opts ...OptionsFunc) *App {
-	a := &App{}
+	a := &App{services: NewServiceRegistry()}
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -62,17 +62,22 @@ func (a *App) Use(middleware ...func(http.Handler) http.Handler) {
 	a.middleware = append(a.middleware, middleware...)
 }
 
-// RegisterService registers an external service like redis, db, or inernal services before modules
-// are initialized. Modules retrieve it via fw.GetService[T](deps.Services).
-// Services are shut down gracefully on exit.
-func (a *App) RegisterService(svc Service) {
+// RegisterService registers an external service such as a database, broker, or
+// cache before module registration. Successfully registered services are shut
+// down gracefully on exit. Call RegisterService before Start.
+func (a *App) RegisterService(svc Service) error {
+	if a.services == nil {
+		a.services = NewServiceRegistry()
+	}
+	if err := a.services.Register(svc); err != nil {
+		return fmt.Errorf("fw: register application service: %w", err)
+	}
 	a.preRegistered = append(a.preRegistered, svc)
+	return nil
 }
 
 // RegisterModules adds modules to the app.
-// Init is called in registration order. Cross-module dependencies must be
-// resolved after all modules have initialized, such as during route registration
-// or lazily inside service methods, if registration order should not matter.
+// fw calls Register on every module before calling Init on any module.
 func (a *App) RegisterModules(modules ...Module) {
 	a.modules = append(a.modules, modules...)
 }
@@ -91,6 +96,10 @@ func (a *App) Start() error {
 	deps := &Deps{
 		Logger:   a.logger,
 		Services: a.services,
+	}
+
+	if err := a.registerModules(deps); err != nil {
+		return err
 	}
 
 	if err := a.initModules(deps); err != nil {
@@ -114,11 +123,10 @@ func (a *App) ensureLogger() {
 
 // setup initialises shared state before modules are wired.
 func (a *App) setup() error {
-	a.services = NewServiceRegistry()
-	a.initializedModules = nil
-	for _, svc := range a.preRegistered {
-		a.services.Register(svc)
+	if a.services == nil {
+		a.services = NewServiceRegistry()
 	}
+	a.registeredModules = nil
 	if a.httpConfig != nil {
 		if a.httpConfig.Router == nil {
 			return fmt.Errorf("fw: HTTP transport requires a router")
@@ -134,17 +142,26 @@ func (a *App) setup() error {
 	return nil
 }
 
-// initModules calls Init on every registered module.
-func (a *App) initModules(deps *Deps) error {
+// registerModules calls Register on every module before initialization begins.
+func (a *App) registerModules(deps *Deps) error {
 	for _, mod := range a.modules {
+		a.logger.Info("registering module", "module", mod.Name())
+		if err := mod.Register(deps); err != nil {
+			a.closeModule(mod)
+			return fmt.Errorf("fw: failed to register module %q: %w", mod.Name(), err)
+		}
+		a.registeredModules = append(a.registeredModules, mod)
+	}
+	return nil
+}
+
+// initModules calls Init after every module has registered its services.
+func (a *App) initModules(deps *Deps) error {
+	for _, mod := range a.registeredModules {
 		a.logger.Info("initializing module", "module", mod.Name())
 		if err := mod.Init(deps); err != nil {
-			if closeErr := mod.Close(); closeErr != nil {
-				a.logger.Error("module close error", "module", mod.Name(), "error", closeErr)
-			}
 			return fmt.Errorf("fw: failed to initialize module %q: %w", mod.Name(), err)
 		}
-		a.initializedModules = append(a.initializedModules, mod)
 	}
 	return nil
 }
@@ -318,12 +335,8 @@ func (a *App) shutdownServers(httpServer *http.Server) {
 }
 
 func (a *App) closeResources() {
-	for i := len(a.initializedModules) - 1; i >= 0; i-- {
-		mod := a.initializedModules[i]
-		a.logger.Info("closing module", "module", mod.Name())
-		if err := mod.Close(); err != nil {
-			a.logger.Error("module close error", "module", mod.Name(), "error", err)
-		}
+	for i := len(a.registeredModules) - 1; i >= 0; i-- {
+		a.closeModule(a.registeredModules[i])
 	}
 
 	for i := len(a.preRegistered) - 1; i >= 0; i-- {
@@ -335,4 +348,11 @@ func (a *App) closeResources() {
 	}
 
 	a.logger.Info("shutdown complete")
+}
+
+func (a *App) closeModule(mod Module) {
+	a.logger.Info("closing module", "module", mod.Name())
+	if err := mod.Close(); err != nil {
+		a.logger.Error("module close error", "module", mod.Name(), "error", err)
+	}
 }

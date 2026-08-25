@@ -25,9 +25,10 @@ func (s *lifecycleService) Close() error {
 }
 
 type lifecycleModule struct {
-	name    string
-	initErr error
-	events  *[]string
+	name        string
+	registerErr error
+	initErr     error
+	events      *[]string
 }
 
 type lifecycleGRPCModule struct {
@@ -37,6 +38,11 @@ type lifecycleGRPCModule struct {
 func (*lifecycleGRPCModule) RegisterGRPC(*grpc.Server) {}
 
 func (m *lifecycleModule) Name() string { return m.name }
+
+func (m *lifecycleModule) Register(*Deps) error {
+	*m.events = append(*m.events, "register module "+m.name)
+	return m.registerErr
+}
 
 func (m *lifecycleModule) Init(*Deps) error {
 	*m.events = append(*m.events, "init module "+m.name)
@@ -73,24 +79,62 @@ func (*noopRouter) Mount(string, http.Handler)                                {}
 
 func TestStartClosesResourcesAfterModuleInitFailure(t *testing.T) {
 	var events []string
-	initialized := &lifecycleModule{name: "user", events: &events}
+	initialized := &lifecycleModule{name: "todo", events: &events}
 	failing := &lifecycleModule{name: "auth", initErr: errors.New("broken wiring"), events: &events}
+	pending := &lifecycleModule{name: "user", events: &events}
 
 	app := New(WithHTTP(HTTPConfig{Router: &noopRouter{}}), WithLogger(discardLogger{}))
-	app.RegisterService(&lifecycleService{name: "postgres", events: &events})
-	app.RegisterService(&lifecycleService{name: "rabbitmq", events: &events})
-	app.RegisterModules(initialized, failing)
+	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {
+		t.Fatalf("RegisterService(postgres) error = %v", err)
+	}
+	if err := app.RegisterService(&lifecycleService{name: "rabbitmq", events: &events}); err != nil {
+		t.Fatalf("RegisterService(rabbitmq) error = %v", err)
+	}
+	app.RegisterModules(initialized, failing, pending)
 
 	err := app.Start()
 	if err == nil || !strings.Contains(err.Error(), `failed to initialize module "auth"`) {
 		t.Fatalf("Start() error = %v, want auth initialization error", err)
 	}
 	want := []string{
-		"init module user",
+		"register module todo",
+		"register module auth",
+		"register module user",
+		"init module todo",
 		"init module auth",
-		"close module auth",
 		"close module user",
+		"close module auth",
+		"close module todo",
 		"close service rabbitmq",
+		"close service postgres",
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("lifecycle events = %v, want %v", events, want)
+	}
+}
+
+func TestStartClosesResourcesAfterModuleRegistrationFailure(t *testing.T) {
+	var events []string
+	registered := &lifecycleModule{name: "todo", events: &events}
+	failing := &lifecycleModule{name: "auth", registerErr: errors.New("duplicate service"), events: &events}
+	skipped := &lifecycleModule{name: "user", events: &events}
+
+	app := New(WithHTTP(HTTPConfig{Router: &noopRouter{}}), WithLogger(discardLogger{}))
+	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {
+		t.Fatalf("RegisterService() error = %v", err)
+	}
+	app.RegisterModules(registered, failing, skipped)
+
+	err := app.Start()
+	if err == nil || !strings.Contains(err.Error(), `failed to register module "auth"`) {
+		t.Fatalf("Start() error = %v, want auth registration error", err)
+	}
+
+	want := []string{
+		"register module todo",
+		"register module auth",
+		"close module auth",
+		"close module todo",
 		"close service postgres",
 	}
 	if !reflect.DeepEqual(events, want) {
@@ -101,7 +145,9 @@ func TestStartClosesResourcesAfterModuleInitFailure(t *testing.T) {
 func TestStartClosesPreRegisteredServicesAfterSetupFailure(t *testing.T) {
 	var events []string
 	app := New(WithHTTP(HTTPConfig{}), WithLogger(discardLogger{}))
-	app.RegisterService(&lifecycleService{name: "postgres", events: &events})
+	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {
+		t.Fatalf("RegisterService() error = %v", err)
+	}
 
 	err := app.Start()
 	if err == nil || !strings.Contains(err.Error(), "HTTP transport requires a router") {
@@ -128,7 +174,9 @@ func TestStartClosesResourcesAfterGRPCListenFailure(t *testing.T) {
 		WithGRPC(GRPCConfig{Addr: listener.Addr().String()}),
 		WithLogger(discardLogger{}),
 	)
-	app.RegisterService(service)
+	if err := app.RegisterService(service); err != nil {
+		t.Fatalf("RegisterService() error = %v", err)
+	}
 	app.RegisterModules(module)
 
 	err = app.Start()
@@ -136,6 +184,7 @@ func TestStartClosesResourcesAfterGRPCListenFailure(t *testing.T) {
 		t.Fatalf("Start() error = %v, want gRPC listen error", err)
 	}
 	want := []string{
+		"register module user",
 		"init module user",
 		"close module user",
 		"close service postgres",
