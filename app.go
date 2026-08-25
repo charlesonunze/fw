@@ -56,8 +56,9 @@ func WithLogger(l Logger) OptionsFunc {
 	return func(a *App) { a.logger = l }
 }
 
-// Use registers global HTTP middleware applied to every route when HTTP is configured.
-// Must be called before Start().
+// Use registers global HTTP middleware applied to every route. Middleware is
+// applied after [HTTPConfig.Middleware]. Use must be called before [App.Start],
+// and Start returns an error when HTTP is not configured.
 func (a *App) Use(middleware ...func(http.Handler) http.Handler) {
 	a.middleware = append(a.middleware, middleware...)
 }
@@ -127,6 +128,9 @@ func (a *App) setup() error {
 		a.services = NewServiceRegistry()
 	}
 	a.registeredModules = nil
+	if a.httpConfig == nil && len(a.middleware) > 0 {
+		return fmt.Errorf("fw: app.Use requires HTTP transport configuration")
+	}
 	if a.httpConfig != nil {
 		if a.httpConfig.Router == nil {
 			return fmt.Errorf("fw: HTTP transport requires a router")
@@ -134,7 +138,6 @@ func (a *App) setup() error {
 		if a.httpConfig.Addr == "" {
 			a.httpConfig.Addr = defaultHTTPAddr
 		}
-		a.httpConfig.Router.Use(a.middleware...)
 	}
 	if a.grpcConfig != nil && a.grpcConfig.Addr == "" {
 		a.grpcConfig.Addr = defaultGRPCAddr
@@ -243,8 +246,20 @@ func (a *App) buildHTTPServer() *http.Server {
 		server = &http.Server{}
 	}
 	server.Addr = a.httpConfig.Addr
-	server.Handler = a.httpConfig.Router
+	server.Handler = a.buildHTTPHandler()
 	return server
+}
+
+func (a *App) buildHTTPHandler() http.Handler {
+	middleware := make([]func(http.Handler) http.Handler, 0, len(a.httpConfig.Middleware)+len(a.middleware))
+	middleware = append(middleware, a.httpConfig.Middleware...)
+	middleware = append(middleware, a.middleware...)
+
+	var handler http.Handler = a.httpConfig.Router
+	for i := len(middleware) - 1; i >= 0; i-- {
+		handler = middleware[i](handler)
+	}
+	return handler
 }
 
 // livenessHandler always returns 200 — the process is alive.
