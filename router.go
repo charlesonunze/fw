@@ -8,8 +8,8 @@ import "net/http"
 //	import fwchi "github.com/charlesonunze/fw/adapters/chi"
 //	import fwgin "github.com/charlesonunze/fw/adapters/gin"
 //
-//	app := fw.New(fw.WithRouter(fwchi.NewRouter(r)))
-//	app := fw.New(fw.WithRouter(fwgin.NewRouter(e)))
+//	app := fw.New(fw.WithHTTP(fw.HTTPConfig{Router: fwchi.NewRouter(r)}))
+//	app := fw.New(fw.WithHTTP(fw.HTTPConfig{Router: fwgin.NewRouter(e)}))
 type Router interface {
 	http.Handler
 	Get(path string, h http.HandlerFunc)

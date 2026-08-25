@@ -90,19 +90,22 @@ func addLocalReplacements(projectDir, router, localFWPath string) error {
 		return fmt.Errorf("local fw path %q does not contain go.mod: %w", absFWPath, err)
 	}
 
-	adapterPath := filepath.Join(absFWPath, "adapters", router)
-	if _, err := os.Stat(filepath.Join(adapterPath, "go.mod")); err != nil {
-		return fmt.Errorf("local %s adapter path %q does not contain go.mod: %w", router, adapterPath, err)
-	}
-
 	fmt.Printf("  edit   go mod (local replacements)\n")
-	adapterModule := "github.com/charlesonunze/fw/adapters/" + router
 	args := []string{
 		"mod", "edit",
 		"-require=github.com/charlesonunze/fw@v0.0.0",
-		"-require=" + adapterModule + "@v0.0.0",
 		"-replace=github.com/charlesonunze/fw=" + absFWPath,
-		"-replace=" + adapterModule + "=" + adapterPath,
+	}
+	if router != "" {
+		adapterPath := filepath.Join(absFWPath, "adapters", router)
+		if _, err := os.Stat(filepath.Join(adapterPath, "go.mod")); err != nil {
+			return fmt.Errorf("local %s adapter path %q does not contain go.mod: %w", router, adapterPath, err)
+		}
+		adapterModule := "github.com/charlesonunze/fw/adapters/" + router
+		args = append(args,
+			"-require="+adapterModule+"@v0.0.0",
+			"-replace="+adapterModule+"="+adapterPath,
+		)
 	}
 	if err := runGo(projectDir, args...); err != nil {
 		return fmt.Errorf("add local module replacements: %w", err)
@@ -140,8 +143,10 @@ func main() {
 	router := gin.New()
 {{- end }}
 	app := fw.New(
-		fw.WithAddr(":8080"),
-		fw.WithRouter(fwrouter.NewRouter(router)),
+		fw.WithHTTP(fw.HTTPConfig{
+			Addr:   ":8080",
+			Router: fwrouter.NewRouter(router),
+		}),
 	)
 
 	// Register your modules here:

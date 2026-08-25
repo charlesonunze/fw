@@ -16,18 +16,21 @@ func TestProjectMainTemplateSupportsRouters(t *testing.T) {
 		router     string
 		wantImport string
 		wantSetup  string
+		wantConfig string
 	}{
 		{
 			name:       "chi",
 			router:     routerChi,
 			wantImport: `"github.com/go-chi/chi/v5"`,
 			wantSetup:  "router := chi.NewRouter()",
+			wantConfig: "fw.WithHTTP(fw.HTTPConfig{",
 		},
 		{
 			name:       "gin",
 			router:     routerGin,
 			wantImport: `"github.com/gin-gonic/gin"`,
 			wantSetup:  "router := gin.New()",
+			wantConfig: "fw.WithHTTP(fw.HTTPConfig{",
 		},
 	}
 
@@ -48,6 +51,9 @@ func TestProjectMainTemplateSupportsRouters(t *testing.T) {
 			}
 			if !strings.Contains(string(content), tt.wantSetup) {
 				t.Errorf("generated main missing setup %q:\n%s", tt.wantSetup, content)
+			}
+			if !strings.Contains(string(content), tt.wantConfig) {
+				t.Errorf("generated main missing config %q:\n%s", tt.wantConfig, content)
 			}
 			if _, err := parser.ParseFile(token.NewFileSet(), path, content, parser.AllErrors); err != nil {
 				t.Errorf("generated main is invalid Go: %v\n%s", err, content)
