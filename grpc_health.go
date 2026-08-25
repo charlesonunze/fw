@@ -2,7 +2,6 @@ package fw
 
 import (
 	"context"
-	"time"
 
 	"google.golang.org/grpc/codes"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
@@ -13,7 +12,7 @@ const grpcHealthServiceName = "grpc.health.v1.Health"
 
 type grpcHealthServer struct {
 	grpc_health_v1.UnimplementedHealthServer
-	modules []Module
+	evaluate func(context.Context) healthReport
 }
 
 func (a *App) registerGRPCHealth() {
@@ -21,7 +20,7 @@ func (a *App) registerGRPCHealth() {
 		return
 	}
 	grpc_health_v1.RegisterHealthServer(a.grpcServer, &grpcHealthServer{
-		modules: append([]Module(nil), a.modules...),
+		evaluate: a.evaluateHealth,
 	})
 }
 
@@ -41,12 +40,8 @@ func (s *grpcHealthServer) List(ctx context.Context, _ *grpc_health_v1.HealthLis
 }
 
 func (s *grpcHealthServer) status(ctx context.Context) grpc_health_v1.HealthCheckResponse_ServingStatus {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	for _, module := range s.modules {
-		if err := module.Health(ctx); err != nil {
-			return grpc_health_v1.HealthCheckResponse_NOT_SERVING
-		}
+	if !s.evaluate(ctx).healthy {
+		return grpc_health_v1.HealthCheckResponse_NOT_SERVING
 	}
 	return grpc_health_v1.HealthCheckResponse_SERVING
 }

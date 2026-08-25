@@ -23,9 +23,11 @@ type Module interface {
 	// another module's Init may not have run yet.
 	Init(deps *Deps) error
 
-	// Health reports whether the module is healthy.
-	// fw aggregates results at GET /health/ready.
-	// Return nil if healthy, an error describing the problem if not.
+	// Health reports whether the module is healthy. fw aggregates results for
+	// the configured HTTP readiness and gRPC health services.
+	// Return nil if healthy, or an error describing the problem if not. Errors
+	// are logged on health transitions but are not exposed by built-in health
+	// endpoints, so they must not contain secrets.
 	Health(ctx context.Context) error
 
 	// Close gracefully shuts down the module and releases resources. It must be

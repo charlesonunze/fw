@@ -24,6 +24,7 @@ type App struct {
 	httpConfig        *HTTPConfig
 	grpcConfig        *GRPCConfig
 	grpcServer        *grpc.Server
+	health            *healthEvaluator
 	logger            Logger
 	services          *ServiceRegistry
 }
@@ -33,7 +34,10 @@ type OptionsFunc func(*App)
 
 // New creates a new App with the given options.
 func New(opts ...OptionsFunc) *App {
-	a := &App{services: NewServiceRegistry()}
+	a := &App{
+		health:   newHealthEvaluator(),
+		services: NewServiceRegistry(),
+	}
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -272,7 +276,6 @@ func (a *App) livenessHandler() http.HandlerFunc {
 
 type moduleHealthStatus struct {
 	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
 }
 
 type readinessResponse struct {
@@ -284,21 +287,20 @@ type readinessResponse struct {
 // Returns 200 if all healthy, 503 if any are degraded.
 func (a *App) readinessHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-
+		report := a.evaluateHealth(r.Context())
 		resp := readinessResponse{
 			Status:  "ok",
 			Modules: make(map[string]moduleHealthStatus),
 		}
-
-		for _, mod := range a.modules {
-			if err := mod.Health(ctx); err != nil {
-				resp.Modules[mod.Name()] = moduleHealthStatus{Status: "error", Error: err.Error()}
-				resp.Status = "degraded"
-			} else {
-				resp.Modules[mod.Name()] = moduleHealthStatus{Status: "ok"}
+		if !report.healthy {
+			resp.Status = "degraded"
+		}
+		for module, healthy := range report.modules {
+			status := "error"
+			if healthy {
+				status = "ok"
 			}
+			resp.Modules[module] = moduleHealthStatus{Status: status}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
