@@ -69,12 +69,13 @@ func (a *App) Use(middleware ...func(http.Handler) http.Handler) {
 
 // RegisterService registers an external service such as a database, broker, or
 // cache before module registration. Successfully registered services are shut
-// down gracefully on exit. Call RegisterService before Start.
-func (a *App) RegisterService(svc Service) error {
+// down gracefully on exit. Use As to expose additional interface contracts.
+// Call RegisterService before Start.
+func (a *App) RegisterService(svc Service, options ...RegistrationOption) error {
 	if a.services == nil {
 		a.services = NewServiceRegistry()
 	}
-	if err := a.services.Register(svc); err != nil {
+	if err := a.services.Register(svc, options...); err != nil {
 		return fmt.Errorf("fw: register application service: %w", err)
 	}
 	a.preRegistered = append(a.preRegistered, svc)
