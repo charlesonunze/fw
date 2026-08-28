@@ -3,13 +3,9 @@ package fw
 import (
 	"context"
 	"errors"
-	"net"
-	"net/http"
 	"reflect"
 	"strings"
 	"testing"
-
-	"google.golang.org/grpc"
 )
 
 type lifecycleService struct {
@@ -30,12 +26,6 @@ type lifecycleModule struct {
 	initErr     error
 	events      *[]string
 }
-
-type lifecycleGRPCModule struct {
-	*lifecycleModule
-}
-
-func (*lifecycleGRPCModule) RegisterGRPC(*grpc.Server) {}
 
 func (m *lifecycleModule) Name() string { return m.name }
 
@@ -64,26 +54,13 @@ func (discardLogger) Debug(string, ...any) {}
 func (discardLogger) Warn(string, ...any)  {}
 func (l discardLogger) With(...any) Logger { return l }
 
-type noopRouter struct{}
-
-func (*noopRouter) ServeHTTP(http.ResponseWriter, *http.Request)              {}
-func (*noopRouter) Get(string, http.HandlerFunc)                              {}
-func (*noopRouter) Post(string, http.HandlerFunc)                             {}
-func (*noopRouter) Put(string, http.HandlerFunc)                              {}
-func (*noopRouter) Delete(string, http.HandlerFunc)                           {}
-func (*noopRouter) Patch(string, http.HandlerFunc)                            {}
-func (*noopRouter) Handle(string, string, http.HandlerFunc)                   {}
-func (r *noopRouter) Group(string, ...func(http.Handler) http.Handler) Router { return r }
-func (*noopRouter) Use(...func(http.Handler) http.Handler)                    {}
-func (*noopRouter) Mount(string, http.Handler)                                {}
-
 func TestStartClosesResourcesAfterModuleInitFailure(t *testing.T) {
 	var events []string
 	initialized := &lifecycleModule{name: "todo", events: &events}
 	failing := &lifecycleModule{name: "auth", initErr: errors.New("broken wiring"), events: &events}
 	pending := &lifecycleModule{name: "user", events: &events}
 
-	app := New(WithHTTP(HTTPConfig{Router: &noopRouter{}}), WithLogger(discardLogger{}))
+	app := New(WithLogger(discardLogger{}))
 	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {
 		t.Fatalf("RegisterService(postgres) error = %v", err)
 	}
@@ -119,7 +96,7 @@ func TestStartClosesResourcesAfterModuleRegistrationFailure(t *testing.T) {
 	failing := &lifecycleModule{name: "auth", registerErr: errors.New("duplicate service"), events: &events}
 	skipped := &lifecycleModule{name: "user", events: &events}
 
-	app := New(WithHTTP(HTTPConfig{Router: &noopRouter{}}), WithLogger(discardLogger{}))
+	app := New(WithLogger(discardLogger{}))
 	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {
 		t.Fatalf("RegisterService() error = %v", err)
 	}
@@ -144,14 +121,15 @@ func TestStartClosesResourcesAfterModuleRegistrationFailure(t *testing.T) {
 
 func TestStartClosesPreRegisteredServicesAfterSetupFailure(t *testing.T) {
 	var events []string
-	app := New(WithHTTP(HTTPConfig{}), WithLogger(discardLogger{}))
+	var transport *lifecycleTransport
+	app := New(WithTransport(transport), WithLogger(discardLogger{}))
 	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {
 		t.Fatalf("RegisterService() error = %v", err)
 	}
 
 	err := app.Start(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "HTTP transport requires a router") {
-		t.Fatalf("Start() error = %v, want missing router error", err)
+	if err == nil || !strings.Contains(err.Error(), "transport 0 is nil") {
+		t.Fatalf("Start() error = %v, want nil transport error", err)
 	}
 	want := []string{"close service postgres"}
 	if !reflect.DeepEqual(events, want) {
@@ -159,19 +137,13 @@ func TestStartClosesPreRegisteredServicesAfterSetupFailure(t *testing.T) {
 	}
 }
 
-func TestStartClosesResourcesAfterGRPCListenFailure(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen() error = %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-
+func TestStartClosesResourcesAfterTransportPreparationFailure(t *testing.T) {
 	var events []string
 	service := &lifecycleService{name: "postgres", events: &events}
-	module := &lifecycleGRPCModule{lifecycleModule: &lifecycleModule{name: "user", events: &events}}
+	module := &lifecycleModule{name: "user", events: &events}
+	prepareErr := errors.New("address already in use")
 	app := New(
-		WithHTTP(HTTPConfig{Addr: "127.0.0.1:0", Router: &noopRouter{}}),
-		WithGRPC(GRPCConfig{Addr: listener.Addr().String()}),
+		WithTransport(&lifecycleTransport{prepareErr: prepareErr}),
 		WithLogger(discardLogger{}),
 	)
 	if err := app.RegisterService(service); err != nil {
@@ -179,9 +151,9 @@ func TestStartClosesResourcesAfterGRPCListenFailure(t *testing.T) {
 	}
 	app.RegisterModules(module)
 
-	err = app.Start(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "failed to listen on gRPC addr") {
-		t.Fatalf("Start() error = %v, want gRPC listen error", err)
+	err := app.Start(context.Background())
+	if !errors.Is(err, prepareErr) {
+		t.Fatalf("Start() error = %v, want transport preparation error", err)
 	}
 	want := []string{
 		"register module user",
@@ -192,4 +164,66 @@ func TestStartClosesResourcesAfterGRPCListenFailure(t *testing.T) {
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("lifecycle events = %v, want %v", events, want)
 	}
+}
+
+func TestStartStopsOnlySuccessfullyPreparedTransports(t *testing.T) {
+	var events []string
+	prepareErr := errors.New("address already in use")
+	first := &recordingTransport{name: "http", events: &events}
+	second := &recordingTransport{name: "grpc", events: &events, prepareErr: prepareErr}
+	app := New(
+		WithTransport(first),
+		WithTransport(second),
+		WithLogger(discardLogger{}),
+	)
+
+	err := app.Start(context.Background())
+	if !errors.Is(err, prepareErr) {
+		t.Fatalf("Start() error = %v, want transport preparation error", err)
+	}
+	want := []string{
+		"prepare transport http",
+		"prepare transport grpc",
+		"stop transport http",
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("transport events = %v, want %v", events, want)
+	}
+}
+
+type lifecycleTransport struct {
+	prepareErr error
+}
+
+func (*lifecycleTransport) Name() string { return "test" }
+
+func (t *lifecycleTransport) Prepare(context.Context, TransportDeps) error {
+	return t.prepareErr
+}
+
+func (*lifecycleTransport) Run(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (*lifecycleTransport) Stop(context.Context) error { return nil }
+
+type recordingTransport struct {
+	name       string
+	events     *[]string
+	prepareErr error
+}
+
+func (t *recordingTransport) Name() string { return t.name }
+
+func (t *recordingTransport) Prepare(context.Context, TransportDeps) error {
+	*t.events = append(*t.events, "prepare transport "+t.name)
+	return t.prepareErr
+}
+
+func (*recordingTransport) Run(context.Context) error { return nil }
+
+func (t *recordingTransport) Stop(context.Context) error {
+	*t.events = append(*t.events, "stop transport "+t.name)
+	return nil
 }

@@ -195,6 +195,7 @@ import (
 	"context"
 
 	"github.com/charlesonunze/fw"
+	fwhttp "github.com/charlesonunze/fw/transport/http"
 )
 
 // Module owns the {{ .Name }} domain and its transports.
@@ -225,7 +226,7 @@ func (m *Module) Init(_ context.Context, _ *fw.Deps) error {
 }
 
 // RegisterRoutes exposes the module's HTTP routes.
-func (m *Module) RegisterRoutes(r fw.Router) {
+func (m *Module) RegisterRoutes(r fwhttp.Router) {
 	r.Group("/{{ .Name }}s").Get("/{id}", m.handler.GetByID)
 }
 

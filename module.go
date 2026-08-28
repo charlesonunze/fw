@@ -5,9 +5,8 @@ import "context"
 // Module represents a self-contained application module.
 // Each module owns its domain logic, data layer, and transport handlers.
 //
-// To expose HTTP routes, implement HTTPModule.
-// To expose gRPC services, implement GRPCModule.
-// Both are optional and discovered via type assertion at startup.
+// Optional transport packages define their own module contracts and discover
+// them through type assertions during transport preparation.
 type Module interface {
 	// Name returns the unique module name (e.g. "user", "order").
 	Name() string

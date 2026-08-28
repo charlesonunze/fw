@@ -1,17 +1,18 @@
-// Package gin provides a fw.Router adapter for the gin-gonic/gin router.
+// Package gin provides an fwhttp.Router adapter for the gin-gonic/gin router.
 //
 // Usage:
 //
 //	import fwgin "github.com/charlesonunze/fw/adapters/gin"
 //
 //	e := gin.Default()
-//	app := fw.New(fw.WithHTTP(fw.HTTPConfig{Router: fwgin.NewRouter(e)}))
+//	httpTransport := fwhttp.New(fwhttp.Config{Router: fwgin.NewRouter(e)})
+//	app := fw.New(fw.WithTransport(httpTransport))
 package gin
 
 import (
 	"net/http"
 
-	"github.com/charlesonunze/fw"
+	fwhttp "github.com/charlesonunze/fw/transport/http"
 	"github.com/gin-gonic/gin"
 )
 
@@ -21,8 +22,8 @@ type ginRouter struct {
 	middleware []func(http.Handler) http.Handler
 }
 
-// NewRouter wraps a pre-configured *gin.Engine as an fw.Router.
-func NewRouter(e *gin.Engine) fw.Router {
+// NewRouter wraps a pre-configured *gin.Engine as an fwhttp.Router.
+func NewRouter(e *gin.Engine) fwhttp.Router {
 	return &ginRouter{engine: e, group: e}
 }
 
@@ -54,7 +55,7 @@ func (g *ginRouter) Handle(method, path string, h http.HandlerFunc) {
 	g.group.Handle(method, path, g.wrap(h))
 }
 
-func (g *ginRouter) Group(prefix string, middleware ...func(http.Handler) http.Handler) fw.Router {
+func (g *ginRouter) Group(prefix string, middleware ...func(http.Handler) http.Handler) fwhttp.Router {
 	grp := g.group.Group(prefix)
 	inherited := make([]func(http.Handler) http.Handler, 0, len(g.middleware)+len(middleware))
 	inherited = append(inherited, g.middleware...)

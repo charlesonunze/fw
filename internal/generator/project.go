@@ -131,6 +131,7 @@ import (
 	"syscall"
 
 	"github.com/charlesonunze/fw"
+	fwhttp "github.com/charlesonunze/fw/transport/http"
 {{- if eq .Router "chi" }}
 	fwrouter "github.com/charlesonunze/fw/adapters/chi"
 	"github.com/go-chi/chi/v5"
@@ -150,10 +151,10 @@ func main() {
 	router := gin.New()
 {{- end }}
 	app := fw.New(
-		fw.WithHTTP(fw.HTTPConfig{
+		fw.WithTransport(fwhttp.New(fwhttp.Config{
 			Addr:   ":8080",
 			Router: fwrouter.NewRouter(router),
-		}),
+		})),
 	)
 
 	// Register your modules here:
