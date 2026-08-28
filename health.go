@@ -31,7 +31,7 @@ func (a *App) evaluateHealth(ctx context.Context) healthReport {
 	defer cancel()
 
 	report := healthReport{
-		healthy: true,
+		healthy: a.ready.Load(),
 		modules: make(map[string]bool, len(a.modules)),
 	}
 	for _, module := range a.modules {

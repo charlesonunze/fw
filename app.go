@@ -5,12 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
+	"sync/atomic"
 
 	"google.golang.org/grpc"
 )
@@ -18,16 +15,29 @@ import (
 // App is the application container that manages modules, services,
 // and the HTTP and gRPC servers.
 type App struct {
-	modules           []Module
-	registeredModules []Module
-	preRegistered     []Service
-	middleware        []func(http.Handler) http.Handler
-	httpConfig        *HTTPConfig
-	grpcConfig        *GRPCConfig
-	grpcServer        *grpc.Server
-	health            *healthEvaluator
-	logger            Logger
-	services          *ServiceRegistry
+	modules            []Module
+	registeredModules  []Module
+	initializedModules []Module
+	preRegistered      []Service
+	middleware         []func(http.Handler) http.Handler
+	httpConfig         *HTTPConfig
+	grpcConfig         *GRPCConfig
+	grpcServer         *grpc.Server
+	health             *healthEvaluator
+	logger             Logger
+	services           *ServiceRegistry
+
+	lifecycleMu   sync.Mutex
+	state         appState
+	stopRequested bool
+	stopContext   context.Context
+	stopCh        chan struct{}
+	stopped       chan struct{}
+	runtimeCancel context.CancelCauseFunc
+	shutdownErr   error
+	closeOnce     sync.Once
+	closeErr      error
+	ready         atomic.Bool
 }
 
 // Option configures the App.
@@ -38,7 +48,13 @@ func New(opts ...OptionsFunc) *App {
 	a := &App{
 		health:   newHealthEvaluator(),
 		services: NewServiceRegistry(),
+		state:    appStateNew,
+		stopCh:   make(chan struct{}),
+		stopped:  make(chan struct{}),
 	}
+	// Unit-level health evaluation remains useful before a transport is started.
+	// Start marks the app unavailable until startup completes.
+	a.ready.Store(true)
 	for _, opt := range opts {
 		opt(a)
 	}
@@ -89,39 +105,6 @@ func (a *App) RegisterModules(modules ...Module) {
 	a.modules = append(a.modules, modules...)
 }
 
-// Start initializes all services and modules, starts the configured transports,
-// and blocks until a shutdown signal is received. With no transports configured,
-// Start runs as a worker-only application.
-func (a *App) Start() error {
-	a.ensureLogger()
-	defer a.closeResources()
-
-	if err := a.setup(); err != nil {
-		return err
-	}
-
-	deps := &Deps{
-		Logger:   a.logger,
-		Services: a.services,
-	}
-
-	if err := a.registerModules(deps); err != nil {
-		return err
-	}
-
-	if err := a.initModules(deps); err != nil {
-		return err
-	}
-
-	a.registerRoutes()
-
-	if err := a.buildGRPCServer(); err != nil {
-		return err
-	}
-
-	return a.serve()
-}
-
 func (a *App) ensureLogger() {
 	if a.logger == nil {
 		a.logger = newDefaultLogger("info")
@@ -134,6 +117,7 @@ func (a *App) setup() error {
 		a.services = NewServiceRegistry()
 	}
 	a.registeredModules = nil
+	a.initializedModules = nil
 	if a.httpConfig == nil && len(a.middleware) > 0 {
 		return fmt.Errorf("fw: app.Use requires HTTP transport configuration")
 	}
@@ -155,20 +139,20 @@ func (a *App) setup() error {
 func (a *App) registerModules(deps *Deps) error {
 	for _, mod := range a.modules {
 		a.logger.Info("registering module", "module", mod.Name())
+		a.registeredModules = append(a.registeredModules, mod)
 		if err := mod.Register(deps); err != nil {
-			a.closeModule(mod)
 			return fmt.Errorf("fw: failed to register module %q: %w", mod.Name(), err)
 		}
-		a.registeredModules = append(a.registeredModules, mod)
 	}
 	return nil
 }
 
 // initModules calls Init after every module has registered its services.
-func (a *App) initModules(deps *Deps) error {
+func (a *App) initModules(ctx context.Context, deps *Deps) error {
 	for _, mod := range a.registeredModules {
 		a.logger.Info("initializing module", "module", mod.Name())
-		if err := mod.Init(deps); err != nil {
+		a.initializedModules = append(a.initializedModules, mod)
+		if err := mod.Init(ctx, deps); err != nil {
 			return fmt.Errorf("fw: failed to initialize module %q: %w", mod.Name(), err)
 		}
 	}
@@ -207,40 +191,6 @@ func (a *App) buildGRPCServer() error {
 	}
 	a.registerGRPCHealth()
 	return nil
-}
-
-// serve starts configured transports and blocks.
-func (a *App) serve() error {
-	httpServer := a.buildHTTPServer()
-	defer a.shutdownServers(httpServer)
-
-	errCh := make(chan error, 2)
-
-	if httpServer != nil {
-		go func() {
-			a.logger.Info("starting http server", "addr", a.httpConfig.Addr)
-			err := httpServer.ListenAndServe()
-			if err != nil && err != http.ErrServerClosed {
-				errCh <- fmt.Errorf("fw: http server error: %w", err)
-			}
-		}()
-	}
-
-	if a.grpcServer != nil {
-		lis, err := net.Listen("tcp", a.grpcConfig.Addr)
-		if err != nil {
-			return fmt.Errorf("fw: failed to listen on gRPC addr %q: %w", a.grpcConfig.Addr, err)
-		}
-		go func() {
-			a.logger.Info("starting grpc server", "addr", a.grpcConfig.Addr)
-			err := a.grpcServer.Serve(lis)
-			if err != nil {
-				errCh <- fmt.Errorf("fw: grpc server error: %w", err)
-			}
-		}()
-	}
-
-	return a.waitForShutdown(errCh)
 }
 
 func (a *App) buildHTTPServer() *http.Server {
@@ -316,92 +266,35 @@ func (a *App) readinessHandler() http.HandlerFunc {
 	}
 }
 
-func (a *App) waitForShutdown(errCh chan error) error {
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(quit)
-
-	select {
-	case err := <-errCh:
-		return err
-	case sig := <-quit:
-		a.logger.Info("shutdown signal received", "signal", sig.String())
-		return nil
-	}
-}
-
-func (a *App) shutdownServers(httpServer *http.Server) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
-	defer cancel()
-	a.shutdownServersWithContext(ctx, httpServer)
-}
-
-func (a *App) shutdownServersWithContext(ctx context.Context, httpServer *http.Server) {
-	var shutdowns sync.WaitGroup
-	if httpServer != nil {
-		shutdowns.Add(1)
-		go func() {
-			defer shutdowns.Done()
-			a.shutdownHTTPServer(ctx, httpServer)
-		}()
-	}
-
-	if a.grpcServer != nil {
-		shutdowns.Add(1)
-		go func() {
-			defer shutdowns.Done()
-			a.shutdownGRPCServer(ctx)
-		}()
-	}
-	shutdowns.Wait()
-}
-
-func (a *App) shutdownHTTPServer(ctx context.Context, server *http.Server) {
-	if err := server.Shutdown(ctx); err != nil {
-		a.logger.Warn("HTTP graceful shutdown failed, forcing close", "error", err)
-		if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
-			a.logger.Error("HTTP server force close error", "error", closeErr)
+func (a *App) closeResources() error {
+	a.closeOnce.Do(func() {
+		var closeErrors []error
+		for i := len(a.registeredModules) - 1; i >= 0; i-- {
+			if err := a.closeModule(a.registeredModules[i]); err != nil {
+				closeErrors = append(closeErrors, err)
+			}
 		}
-		return
-	}
-	a.logger.Info("HTTP server stopped gracefully")
-}
 
-func (a *App) shutdownGRPCServer(ctx context.Context) {
-	done := make(chan struct{})
-	go func() {
-		a.grpcServer.GracefulStop()
-		close(done)
-	}()
-	select {
-	case <-done:
-		a.logger.Info("gRPC server stopped gracefully")
-	case <-ctx.Done():
-		a.logger.Warn("gRPC graceful stop timed out, forcing stop")
-		a.grpcServer.Stop()
-		<-done
-	}
-}
-
-func (a *App) closeResources() {
-	for i := len(a.registeredModules) - 1; i >= 0; i-- {
-		a.closeModule(a.registeredModules[i])
-	}
-
-	for i := len(a.preRegistered) - 1; i >= 0; i-- {
-		svc := a.preRegistered[i]
-		a.logger.Info("closing service", "service", svc.Name())
-		if err := svc.Close(); err != nil {
-			a.logger.Error("service close error", "service", svc.Name(), "error", err)
+		for i := len(a.preRegistered) - 1; i >= 0; i-- {
+			svc := a.preRegistered[i]
+			a.logger.Info("closing service", "service", svc.Name())
+			if err := svc.Close(); err != nil {
+				a.logger.Error("service close error", "service", svc.Name(), "error", err)
+				closeErrors = append(closeErrors, fmt.Errorf("fw: close application service %q: %w", svc.Name(), err))
+			}
 		}
-	}
 
-	a.logger.Info("shutdown complete")
+		a.closeErr = errors.Join(closeErrors...)
+		a.logger.Info("shutdown complete")
+	})
+	return a.closeErr
 }
 
-func (a *App) closeModule(mod Module) {
+func (a *App) closeModule(mod Module) error {
 	a.logger.Info("closing module", "module", mod.Name())
 	if err := mod.Close(); err != nil {
 		a.logger.Error("module close error", "module", mod.Name(), "error", err)
+		return fmt.Errorf("fw: close module %q: %w", mod.Name(), err)
 	}
+	return nil
 }

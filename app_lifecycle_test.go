@@ -44,7 +44,7 @@ func (m *lifecycleModule) Register(*Deps) error {
 	return m.registerErr
 }
 
-func (m *lifecycleModule) Init(*Deps) error {
+func (m *lifecycleModule) Init(context.Context, *Deps) error {
 	*m.events = append(*m.events, "init module "+m.name)
 	return m.initErr
 }
@@ -92,7 +92,7 @@ func TestStartClosesResourcesAfterModuleInitFailure(t *testing.T) {
 	}
 	app.RegisterModules(initialized, failing, pending)
 
-	err := app.Start()
+	err := app.Start(context.Background())
 	if err == nil || !strings.Contains(err.Error(), `failed to initialize module "auth"`) {
 		t.Fatalf("Start() error = %v, want auth initialization error", err)
 	}
@@ -125,7 +125,7 @@ func TestStartClosesResourcesAfterModuleRegistrationFailure(t *testing.T) {
 	}
 	app.RegisterModules(registered, failing, skipped)
 
-	err := app.Start()
+	err := app.Start(context.Background())
 	if err == nil || !strings.Contains(err.Error(), `failed to register module "auth"`) {
 		t.Fatalf("Start() error = %v, want auth registration error", err)
 	}
@@ -149,7 +149,7 @@ func TestStartClosesPreRegisteredServicesAfterSetupFailure(t *testing.T) {
 		t.Fatalf("RegisterService() error = %v", err)
 	}
 
-	err := app.Start()
+	err := app.Start(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "HTTP transport requires a router") {
 		t.Fatalf("Start() error = %v, want missing router error", err)
 	}
@@ -179,7 +179,7 @@ func TestStartClosesResourcesAfterGRPCListenFailure(t *testing.T) {
 	}
 	app.RegisterModules(module)
 
-	err = app.Start()
+	err = app.Start(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "failed to listen on gRPC addr") {
 		t.Fatalf("Start() error = %v, want gRPC listen error", err)
 	}

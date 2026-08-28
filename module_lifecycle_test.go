@@ -35,7 +35,7 @@ func (m *phaseModule) Register(deps *Deps) error {
 	return m.registerFn(deps)
 }
 
-func (m *phaseModule) Init(deps *Deps) error {
+func (m *phaseModule) Init(_ context.Context, deps *Deps) error {
 	*m.events = append(*m.events, "init "+m.name)
 	return m.initFn(deps)
 }
@@ -89,7 +89,7 @@ func TestModuleRegistrationOrderDoesNotAffectDependencyResolution(t *testing.T) 
 	if err := app.registerModules(deps); err != nil {
 		t.Fatalf("registerModules() error = %v", err)
 	}
-	if err := app.initModules(deps); err != nil {
+	if err := app.initModules(context.Background(), deps); err != nil {
 		t.Fatalf("initModules() error = %v", err)
 	}
 

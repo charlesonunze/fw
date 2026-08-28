@@ -124,7 +124,11 @@ func runGo(dir string, args ...string) error {
 var projectMainTmpl = `package main
 
 import (
+	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/charlesonunze/fw"
 {{- if eq .Router "chi" }}
@@ -137,6 +141,9 @@ import (
 )
 
 func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 {{- if eq .Router "chi" }}
 	router := chi.NewRouter()
 {{- else }}
@@ -154,7 +161,7 @@ func main() {
 	// 	user.New(),
 	// )
 
-	if err := app.Start(); err != nil {
+	if err := app.Start(ctx); err != nil {
 		log.Fatal(err)
 	}
 }
