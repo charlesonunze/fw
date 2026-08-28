@@ -16,8 +16,9 @@ import (
 )
 
 type ginRouter struct {
-	engine *gin.Engine
-	group  gin.IRouter
+	engine     *gin.Engine
+	group      gin.IRouter
+	middleware []func(http.Handler) http.Handler
 }
 
 // NewRouter wraps a pre-configured *gin.Engine as an fw.Router.
@@ -30,53 +31,48 @@ func (g *ginRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *ginRouter) Get(path string, h http.HandlerFunc) {
-	g.group.GET(path, gin.WrapF(h))
+	g.group.GET(path, g.wrap(h))
 }
 
 func (g *ginRouter) Post(path string, h http.HandlerFunc) {
-	g.group.POST(path, gin.WrapF(h))
+	g.group.POST(path, g.wrap(h))
 }
 
 func (g *ginRouter) Put(path string, h http.HandlerFunc) {
-	g.group.PUT(path, gin.WrapF(h))
+	g.group.PUT(path, g.wrap(h))
 }
 
 func (g *ginRouter) Delete(path string, h http.HandlerFunc) {
-	g.group.DELETE(path, gin.WrapF(h))
+	g.group.DELETE(path, g.wrap(h))
 }
 
 func (g *ginRouter) Patch(path string, h http.HandlerFunc) {
-	g.group.PATCH(path, gin.WrapF(h))
+	g.group.PATCH(path, g.wrap(h))
 }
 
 func (g *ginRouter) Handle(method, path string, h http.HandlerFunc) {
-	g.group.Handle(method, path, gin.WrapF(h))
+	g.group.Handle(method, path, g.wrap(h))
 }
 
 func (g *ginRouter) Group(prefix string, middleware ...func(http.Handler) http.Handler) fw.Router {
 	grp := g.group.Group(prefix)
-	for _, m := range middleware {
-		grp.Use(adaptMiddleware(m))
-	}
-	return &ginRouter{engine: g.engine, group: grp}
+	inherited := make([]func(http.Handler) http.Handler, 0, len(g.middleware)+len(middleware))
+	inherited = append(inherited, g.middleware...)
+	inherited = append(inherited, middleware...)
+	return &ginRouter{engine: g.engine, group: grp, middleware: inherited}
 }
 
 func (g *ginRouter) Use(middleware ...func(http.Handler) http.Handler) {
-	for _, m := range middleware {
-		g.group.Use(adaptMiddleware(m))
-	}
+	g.middleware = append(g.middleware, middleware...)
 }
 
 func (g *ginRouter) Mount(pattern string, h http.Handler) {
-	g.group.Any(pattern+"/*path", gin.WrapH(h))
+	g.group.Any(pattern+"/*path", g.wrap(h))
 }
 
-// adaptMiddleware converts a standard http middleware to a gin.HandlerFunc.
-func adaptMiddleware(mw func(http.Handler) http.Handler) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			c.Request = r
-			c.Next()
-		})).ServeHTTP(c.Writer, c.Request)
+func (g *ginRouter) wrap(handler http.Handler) gin.HandlerFunc {
+	for i := len(g.middleware) - 1; i >= 0; i-- {
+		handler = g.middleware[i](handler)
 	}
+	return gin.WrapH(handler)
 }
