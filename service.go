@@ -1,8 +1,8 @@
 package fw
 
 // Service is the interface that all registered services must implement.
-// The Name method returns the unique key used for registration and lookup
-// in the ServiceRegistry.
+// Name is the unique operational identity used for diagnostics and lifecycle
+// logging. Dependency lookup uses exact Go types instead.
 type Service interface {
 	Name() string
 	Close() error
