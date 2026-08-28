@@ -60,3 +60,7 @@ jobs:
       - name: Test
         working-directory: ${{ matrix.directory }}
         run: go test -race -count=1 ./...
+
+      - name: Vulnerability scan
+        working-directory: ${{ matrix.directory }}
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
