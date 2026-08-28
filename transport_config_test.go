@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 )
@@ -51,7 +52,7 @@ func TestTransportConfigurationDefaultsAndSelection(t *testing.T) {
 	t.Run("http only", func(t *testing.T) {
 		module := &multiTransportModule{}
 		router := &noopRouter{}
-		customServer := &http.Server{ReadHeaderTimeout: 1}
+		customServer := &http.Server{ReadHeaderTimeout: time.Second, IdleTimeout: time.Minute}
 		app := New(WithHTTP(HTTPConfig{Router: router, Server: customServer}), WithLogger(discardLogger{}))
 		app.RegisterModules(module)
 		if err := app.setup(); err != nil {
@@ -67,6 +68,9 @@ func TestTransportConfigurationDefaultsAndSelection(t *testing.T) {
 		}
 		if server != customServer || server.Handler != router || server.Addr != defaultHTTPAddr {
 			t.Fatalf("custom HTTP server was not configured by fw: %+v", server)
+		}
+		if server.ReadHeaderTimeout != time.Second || server.IdleTimeout != time.Minute {
+			t.Fatalf("custom HTTP server timeouts changed: %+v", server)
 		}
 		if module.httpRegistrations != 1 || module.grpcRegistrations != 0 || app.grpcServer != nil {
 			t.Fatalf("HTTP-only registrations = HTTP %d, gRPC %d", module.httpRegistrations, module.grpcRegistrations)
@@ -95,6 +99,24 @@ func TestTransportConfigurationDefaultsAndSelection(t *testing.T) {
 			t.Fatalf("gRPC-only registrations = HTTP %d, gRPC %d", module.httpRegistrations, module.grpcRegistrations)
 		}
 	})
+}
+
+func TestFrameworkHTTPServerUsesSafeTimeoutDefaults(t *testing.T) {
+	app := New(WithHTTP(HTTPConfig{Router: &noopRouter{}}), WithLogger(discardLogger{}))
+	if err := app.setup(); err != nil {
+		t.Fatalf("setup() error = %v", err)
+	}
+
+	server := app.buildHTTPServer()
+	if server.ReadHeaderTimeout != defaultHTTPReadHeaderTimeout {
+		t.Fatalf("ReadHeaderTimeout = %s, want %s", server.ReadHeaderTimeout, defaultHTTPReadHeaderTimeout)
+	}
+	if server.IdleTimeout != defaultHTTPIdleTimeout {
+		t.Fatalf("IdleTimeout = %s, want %s", server.IdleTimeout, defaultHTTPIdleTimeout)
+	}
+	if server.ReadTimeout != 0 || server.WriteTimeout != 0 {
+		t.Fatalf("streaming-sensitive timeouts should remain unset: %+v", server)
+	}
 }
 
 func TestHTTPConfigRequiresRouter(t *testing.T) {

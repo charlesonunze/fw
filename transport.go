@@ -2,19 +2,25 @@ package fw
 
 import (
 	"net/http"
+	"time"
 
 	"google.golang.org/grpc"
 )
 
 const (
-	defaultHTTPAddr = ":8888"
-	defaultGRPCAddr = ":9999"
+	defaultHTTPAddr              = ":8888"
+	defaultGRPCAddr              = ":9999"
+	defaultHTTPReadHeaderTimeout = 5 * time.Second
+	defaultHTTPIdleTimeout       = 2 * time.Minute
+	defaultShutdownTimeout       = 30 * time.Second
 )
 
 // HTTPConfig enables and configures the HTTP transport.
 // Router is required. Addr defaults to ":8888". Middleware runs before
 // middleware registered with [App.Use].
-// When Server is provided, fw owns its lifecycle and sets its Addr and Handler.
+// A framework-created server uses conservative header-read and idle timeouts.
+// When Server is provided, fw owns its lifecycle, sets its Addr and Handler,
+// and leaves all other settings unchanged.
 type HTTPConfig struct {
 	Addr       string
 	Router     Router

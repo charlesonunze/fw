@@ -3,13 +3,14 @@ package fw
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
-	"time"
 
 	"google.golang.org/grpc"
 )
@@ -248,7 +249,10 @@ func (a *App) buildHTTPServer() *http.Server {
 	}
 	server := a.httpConfig.Server
 	if server == nil {
-		server = &http.Server{}
+		server = &http.Server{
+			ReadHeaderTimeout: defaultHTTPReadHeaderTimeout,
+			IdleTimeout:       defaultHTTPIdleTimeout,
+		}
 	}
 	server.Addr = a.httpConfig.Addr
 	server.Handler = a.buildHTTPHandler()
@@ -327,28 +331,55 @@ func (a *App) waitForShutdown(errCh chan error) error {
 }
 
 func (a *App) shutdownServers(httpServer *http.Server) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultShutdownTimeout)
 	defer cancel()
+	a.shutdownServersWithContext(ctx, httpServer)
+}
 
+func (a *App) shutdownServersWithContext(ctx context.Context, httpServer *http.Server) {
+	var shutdowns sync.WaitGroup
 	if httpServer != nil {
-		if err := httpServer.Shutdown(ctx); err != nil {
-			a.logger.Error("HTTP server shutdown error", "error", err)
-		}
+		shutdowns.Add(1)
+		go func() {
+			defer shutdowns.Done()
+			a.shutdownHTTPServer(ctx, httpServer)
+		}()
 	}
 
 	if a.grpcServer != nil {
-		done := make(chan struct{})
+		shutdowns.Add(1)
 		go func() {
-			a.grpcServer.GracefulStop()
-			close(done)
+			defer shutdowns.Done()
+			a.shutdownGRPCServer(ctx)
 		}()
-		select {
-		case <-done:
-			a.logger.Info("gRPC server stopped gracefully")
-		case <-ctx.Done():
-			a.logger.Warn("gRPC graceful stop timed out, forcing stop")
-			a.grpcServer.Stop()
+	}
+	shutdowns.Wait()
+}
+
+func (a *App) shutdownHTTPServer(ctx context.Context, server *http.Server) {
+	if err := server.Shutdown(ctx); err != nil {
+		a.logger.Warn("HTTP graceful shutdown failed, forcing close", "error", err)
+		if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+			a.logger.Error("HTTP server force close error", "error", closeErr)
 		}
+		return
+	}
+	a.logger.Info("HTTP server stopped gracefully")
+}
+
+func (a *App) shutdownGRPCServer(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		a.grpcServer.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+		a.logger.Info("gRPC server stopped gracefully")
+	case <-ctx.Done():
+		a.logger.Warn("gRPC graceful stop timed out, forcing stop")
+		a.grpcServer.Stop()
+		<-done
 	}
 }
 
