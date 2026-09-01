@@ -18,8 +18,8 @@ func TestDecoupleMainTemplateUsesSelectedTransport(t *testing.T) {
 		doNotWant string
 		assertion string
 	}{
-		{name: "http", transport: "http", want: "fw.WithHTTP(fw.HTTPConfig{", doNotWant: "fw.WithGRPC(", assertion: "var _ fw.HTTPModule = module"},
-		{name: "grpc", transport: "grpc", want: "fw.WithGRPC(fw.GRPCConfig{", doNotWant: "fwrouter", assertion: "var _ fw.GRPCModule = module"},
+		{name: "http", transport: "http", want: "fw.WithTransport(fwhttp.New(fwhttp.Config{", doNotWant: "fwgrpc", assertion: "var _ fwhttp.Module = module"},
+		{name: "grpc", transport: "grpc", want: "fw.WithTransport(fwgrpc.New(fwgrpc.Config{", doNotWant: "fwrouter", assertion: "var _ fwgrpc.Module = module"},
 	}
 
 	for _, tt := range tests {
@@ -118,8 +118,8 @@ func TestDecoupleModuleRejectsTransportNotImplementedByModule(t *testing.T) {
 	}
 
 	err := DecoupleModule("user", "example.com/app", "output", ":9090", "grpc", routerChi, "")
-	if err == nil || !strings.Contains(err.Error(), "does not implement fw.GRPCModule") {
-		t.Fatalf("DecoupleModule() error = %v, want missing GRPCModule error", err)
+	if err == nil || !strings.Contains(err.Error(), "does not implement fwgrpc.Module") {
+		t.Fatalf("DecoupleModule() error = %v, want missing fwgrpc.Module error", err)
 	}
 }
 

@@ -2,27 +2,20 @@ package fw
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"sync"
 	"sync/atomic"
-
-	"google.golang.org/grpc"
 )
 
-// App is the application container that manages modules, services,
-// and the HTTP and gRPC servers.
+// App is the application container that manages modules, services, optional
+// transports, and their shared lifecycle.
 type App struct {
 	modules            []Module
 	registeredModules  []Module
 	initializedModules []Module
 	preRegistered      []Service
-	middleware         []func(http.Handler) http.Handler
-	httpConfig         *HTTPConfig
-	grpcConfig         *GRPCConfig
-	grpcServer         *grpc.Server
+	transports         []Transport
 	health             *healthEvaluator
 	logger             Logger
 	services           *ServiceRegistry
@@ -61,27 +54,16 @@ func New(opts ...OptionsFunc) *App {
 	return a
 }
 
-// WithHTTP enables and configures the HTTP transport.
-func WithHTTP(config HTTPConfig) OptionsFunc {
-	return func(a *App) { a.httpConfig = &config }
-}
-
-// WithGRPC enables and configures the gRPC transport.
-func WithGRPC(config GRPCConfig) OptionsFunc {
-	return func(a *App) { a.grpcConfig = &config }
+// WithTransport installs an optional application transport such as HTTP or
+// gRPC. Transports prepare and start in option order and stop concurrently.
+func WithTransport(transport Transport) OptionsFunc {
+	return func(a *App) { a.transports = append(a.transports, transport) }
 }
 
 // WithLogger sets a custom logger implementation.
 // If not set, fw uses a JSON slog logger at INFO level.
 func WithLogger(l Logger) OptionsFunc {
 	return func(a *App) { a.logger = l }
-}
-
-// Use registers global HTTP middleware applied to every route. Middleware is
-// applied after [HTTPConfig.Middleware]. Use must be called before [App.Start],
-// and Start returns an error when HTTP is not configured.
-func (a *App) Use(middleware ...func(http.Handler) http.Handler) {
-	a.middleware = append(a.middleware, middleware...)
 }
 
 // RegisterService registers an external service such as a database, broker, or
@@ -118,19 +100,10 @@ func (a *App) setup() error {
 	}
 	a.registeredModules = nil
 	a.initializedModules = nil
-	if a.httpConfig == nil && len(a.middleware) > 0 {
-		return fmt.Errorf("fw: app.Use requires HTTP transport configuration")
-	}
-	if a.httpConfig != nil {
-		if a.httpConfig.Router == nil {
-			return fmt.Errorf("fw: HTTP transport requires a router")
+	for i, transport := range a.transports {
+		if isNilTransport(transport) {
+			return fmt.Errorf("fw: transport %d is nil", i)
 		}
-		if a.httpConfig.Addr == "" {
-			a.httpConfig.Addr = defaultHTTPAddr
-		}
-	}
-	if a.grpcConfig != nil && a.grpcConfig.Addr == "" {
-		a.grpcConfig.Addr = defaultGRPCAddr
 	}
 	return nil
 }
@@ -157,113 +130,6 @@ func (a *App) initModules(ctx context.Context, deps *Deps) error {
 		}
 	}
 	return nil
-}
-
-// registerRoutes mounts HTTP routes and health endpoints.
-func (a *App) registerRoutes() {
-	if a.httpConfig == nil {
-		return
-	}
-	router := a.httpConfig.Router
-	for _, mod := range a.modules {
-		if hm, ok := mod.(HTTPModule); ok {
-			hm.RegisterRoutes(router)
-		}
-	}
-	router.Get("/health/live", a.livenessHandler())
-	router.Get("/health/ready", a.readinessHandler())
-}
-
-// buildGRPCServer wires modules and health into the configured gRPC server.
-func (a *App) buildGRPCServer() error {
-	if a.grpcConfig == nil {
-		a.grpcServer = nil
-		return nil
-	}
-	a.grpcServer = a.grpcConfig.Server
-	if a.grpcServer == nil {
-		a.grpcServer = grpc.NewServer()
-	}
-	for _, mod := range a.modules {
-		if gm, ok := mod.(GRPCModule); ok {
-			gm.RegisterGRPC(a.grpcServer)
-		}
-	}
-	a.registerGRPCHealth()
-	return nil
-}
-
-func (a *App) buildHTTPServer() *http.Server {
-	if a.httpConfig == nil {
-		return nil
-	}
-	server := a.httpConfig.Server
-	if server == nil {
-		server = &http.Server{
-			ReadHeaderTimeout: defaultHTTPReadHeaderTimeout,
-			IdleTimeout:       defaultHTTPIdleTimeout,
-		}
-	}
-	server.Addr = a.httpConfig.Addr
-	server.Handler = a.buildHTTPHandler()
-	return server
-}
-
-func (a *App) buildHTTPHandler() http.Handler {
-	middleware := make([]func(http.Handler) http.Handler, 0, len(a.httpConfig.Middleware)+len(a.middleware))
-	middleware = append(middleware, a.httpConfig.Middleware...)
-	middleware = append(middleware, a.middleware...)
-
-	var handler http.Handler = a.httpConfig.Router
-	for i := len(middleware) - 1; i >= 0; i-- {
-		handler = middleware[i](handler)
-	}
-	return handler
-}
-
-// livenessHandler always returns 200 — the process is alive.
-func (a *App) livenessHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}
-}
-
-type moduleHealthStatus struct {
-	Status string `json:"status"`
-}
-
-type readinessResponse struct {
-	Status  string                        `json:"status"`
-	Modules map[string]moduleHealthStatus `json:"modules"`
-}
-
-// readinessHandler calls Health() on every module and aggregates results.
-// Returns 200 if all healthy, 503 if any are degraded.
-func (a *App) readinessHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		report := a.evaluateHealth(r.Context())
-		resp := readinessResponse{
-			Status:  "ok",
-			Modules: make(map[string]moduleHealthStatus),
-		}
-		if !report.healthy {
-			resp.Status = "degraded"
-		}
-		for module, healthy := range report.modules {
-			status := "error"
-			if healthy {
-				status = "ok"
-			}
-			resp.Modules[module] = moduleHealthStatus{Status: status}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if resp.Status != "ok" {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}
 }
 
 func (a *App) closeResources() error {

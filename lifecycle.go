@@ -4,12 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"sync"
 	"sync/atomic"
-
-	"google.golang.org/grpc"
 )
 
 var errStopRequested = errors.New("fw: stop requested")
@@ -60,44 +56,41 @@ func (a *App) Start(ctx context.Context) error {
 	defer cancelRuntime(nil)
 
 	if trigger, ok := a.pendingShutdown(ctx); ok {
-		return a.shutdownStartup(trigger, nil)
+		return a.shutdownStartup(trigger, nil, nil)
 	}
 	if err := a.setup(); err != nil {
-		return a.shutdownStartup(shutdownTrigger{cause: err}, err)
+		return a.shutdownStartup(shutdownTrigger{cause: err}, err, nil)
 	}
 
 	deps := &Deps{Logger: a.logger, Services: a.services}
 	if err := a.registerModules(deps); err != nil {
-		return a.shutdownStartup(shutdownTrigger{cause: err}, err)
+		return a.shutdownStartup(shutdownTrigger{cause: err}, err, nil)
 	}
 	if trigger, ok := a.pendingShutdown(ctx); ok {
-		return a.shutdownStartup(trigger, nil)
+		return a.shutdownStartup(trigger, nil, nil)
 	}
 
 	if err := a.initModules(runtimeCtx, deps); err != nil {
 		if trigger, ok := a.pendingShutdown(ctx); ok && cancellationError(runtimeCtx, err) {
-			return a.shutdownStartup(trigger, nil)
+			return a.shutdownStartup(trigger, nil, nil)
 		}
-		return a.shutdownStartup(shutdownTrigger{cause: err}, err)
+		return a.shutdownStartup(shutdownTrigger{cause: err}, err, nil)
 	}
 	if trigger, ok := a.pendingShutdown(ctx); ok {
-		return a.shutdownStartup(trigger, nil)
+		return a.shutdownStartup(trigger, nil, nil)
 	}
 
-	a.registerRoutes()
-	if err := a.buildGRPCServer(); err != nil {
-		return a.shutdownStartup(shutdownTrigger{cause: err}, err)
+	transportDeps := TransportDeps{
+		Modules: append([]Module(nil), a.modules...),
+		Logger:  a.logger,
+		Health:  a.evaluateHealth,
 	}
-
-	transports, err := a.prepareTransports()
+	transports, err := a.prepareTransports(runtimeCtx, transportDeps)
 	if err != nil {
-		return a.shutdownStartup(shutdownTrigger{cause: err}, err)
+		return a.shutdownStartup(shutdownTrigger{cause: err}, err, transports)
 	}
 	if trigger, ok := a.pendingShutdown(ctx); ok {
-		if closeErr := transports.closeListeners(); closeErr != nil {
-			return a.shutdownStartup(trigger, closeErr)
-		}
-		return a.shutdownStartup(trigger, nil)
+		return a.shutdownStartup(trigger, nil, transports)
 	}
 
 	components := a.startComponents(runtimeCtx, transports)
@@ -234,7 +227,7 @@ func (a *App) waitForShutdown(parent context.Context, failures <-chan error) shu
 	}
 }
 
-func (a *App) shutdownStartup(trigger shutdownTrigger, startupErr error) error {
+func (a *App) shutdownStartup(trigger shutdownTrigger, startupErr error, transports []Transport) error {
 	a.transition(appStateStopping)
 	a.ready.Store(false)
 	a.cancelRuntime(trigger.cause)
@@ -242,14 +235,13 @@ func (a *App) shutdownStartup(trigger shutdownTrigger, startupErr error) error {
 	ctx, cancel := shutdownContext(trigger.shutdownContext)
 	defer cancel()
 
-	// Application-service runners have not started yet. Their resources are
-	// released by the close phase, while modules whose Init was attempted get a
-	// chance to quiesce partial startup work.
-	stopErr := a.stopModules(ctx)
+	// Runners have not started yet. Prepared transports and modules whose Init
+	// was attempted still get a chance to release partial startup work.
+	stopErr := errors.Join(a.stopTransports(ctx, transports), a.stopModules(ctx))
 	return a.finish(errors.Join(startupErr, stopErr))
 }
 
-func (a *App) shutdownRunning(trigger shutdownTrigger, transports *preparedTransports, components *componentGroup) error {
+func (a *App) shutdownRunning(trigger shutdownTrigger, transports []Transport, components *componentGroup) error {
 	a.transition(appStateStopping)
 	a.ready.Store(false)
 	components.stopping.Store(true)
@@ -259,7 +251,7 @@ func (a *App) shutdownRunning(trigger shutdownTrigger, transports *preparedTrans
 
 	transportDone := make(chan error, 1)
 	go func() {
-		transportDone <- a.shutdownServersWithContext(ctx, transports.httpServer)
+		transportDone <- a.stopTransports(ctx, transports)
 	}()
 
 	a.cancelRuntime(trigger.cause)
@@ -364,49 +356,16 @@ func waitForComponents(ctx context.Context, done <-chan struct{}, name string) e
 	}
 }
 
-type preparedTransports struct {
-	httpServer   *http.Server
-	httpListener net.Listener
-	grpcListener net.Listener
-}
-
-func (a *App) prepareTransports() (*preparedTransports, error) {
-	transports := &preparedTransports{httpServer: a.buildHTTPServer()}
-	if transports.httpServer != nil {
-		listener, err := net.Listen("tcp", a.httpConfig.Addr)
-		if err != nil {
-			return nil, fmt.Errorf("fw: failed to listen on HTTP addr %q: %w", a.httpConfig.Addr, err)
+func (a *App) prepareTransports(ctx context.Context, deps TransportDeps) ([]Transport, error) {
+	prepared := make([]Transport, 0, len(a.transports))
+	for _, transport := range a.transports {
+		a.logger.Info("preparing transport", "transport", transport.Name())
+		if err := transport.Prepare(ctx, deps); err != nil {
+			return prepared, fmt.Errorf("fw: prepare transport %q: %w", transport.Name(), err)
 		}
-		transports.httpListener = listener
+		prepared = append(prepared, transport)
 	}
-
-	if a.grpcServer != nil {
-		listener, err := net.Listen("tcp", a.grpcConfig.Addr)
-		if err != nil {
-			closeErr := transports.closeListeners()
-			return nil, errors.Join(
-				fmt.Errorf("fw: failed to listen on gRPC addr %q: %w", a.grpcConfig.Addr, err),
-				closeErr,
-			)
-		}
-		transports.grpcListener = listener
-	}
-	return transports, nil
-}
-
-func (t *preparedTransports) closeListeners() error {
-	var closeErrors []error
-	if t.httpListener != nil {
-		if err := t.httpListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			closeErrors = append(closeErrors, fmt.Errorf("fw: close HTTP listener: %w", err))
-		}
-	}
-	if t.grpcListener != nil {
-		if err := t.grpcListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			closeErrors = append(closeErrors, fmt.Errorf("fw: close gRPC listener: %w", err))
-		}
-	}
-	return errors.Join(closeErrors...)
+	return prepared, nil
 }
 
 type componentGroup struct {
@@ -435,25 +394,17 @@ func newComponentGroup(capacity int) *componentGroup {
 	}
 }
 
-func (a *App) startComponents(ctx context.Context, transports *preparedTransports) *componentGroup {
-	components := newComponentGroup(len(a.registeredModules) + len(a.preRegistered) + 2)
+func (a *App) startComponents(ctx context.Context, transports []Transport) *componentGroup {
+	components := newComponentGroup(len(a.registeredModules) + len(a.preRegistered) + len(transports))
 
-	if transports.httpListener != nil {
+	for _, transport := range transports {
+		transport := transport
 		components.transportWG.Add(1)
 		go func() {
 			defer components.transportWG.Done()
-			a.logger.Info("starting http server", "addr", a.httpConfig.Addr)
-			err := transports.httpServer.Serve(transports.httpListener)
-			components.recordTransportResult("http", err, errors.Is(err, http.ErrServerClosed))
-		}()
-	}
-	if transports.grpcListener != nil {
-		components.transportWG.Add(1)
-		go func() {
-			defer components.transportWG.Done()
-			a.logger.Info("starting grpc server", "addr", a.grpcConfig.Addr)
-			err := a.grpcServer.Serve(transports.grpcListener)
-			components.recordTransportResult("grpc", err, errors.Is(err, grpc.ErrServerStopped))
+			a.logger.Info("starting transport", "transport", transport.Name())
+			err := transport.Run(ctx)
+			components.recordTransportResult(ctx, transport.Name(), err)
 		}()
 	}
 
@@ -502,11 +453,14 @@ func (g *componentGroup) startRunner(ctx context.Context, kind, name string, run
 	}()
 }
 
-func (g *componentGroup) recordTransportResult(name string, err error, expectedStop bool) {
-	if g.stopping.Load() && (err == nil || expectedStop) {
+func (g *componentGroup) recordTransportResult(ctx context.Context, name string, err error) {
+	if g.stopping.Load() && (err == nil || cancellationError(ctx, err)) {
 		return
 	}
-	if err == nil || expectedStop {
+	if context.Cause(ctx) != nil && (err == nil || cancellationError(ctx, err)) {
+		return
+	}
+	if err == nil {
 		err = errors.New("stopped unexpectedly")
 	}
 	g.recordFailure(fmt.Errorf("fw: %s transport: %w", name, err))
@@ -526,68 +480,30 @@ func (g *componentGroup) failureError() error {
 	return errors.Join(errs...)
 }
 
-func (a *App) shutdownServersWithContext(ctx context.Context, httpServer *http.Server) error {
-	var shutdowns sync.WaitGroup
-	errorsCh := make(chan error, 2)
-	if httpServer != nil {
-		shutdowns.Add(1)
-		go func() {
-			defer shutdowns.Done()
-			if err := a.shutdownHTTPServer(ctx, httpServer); err != nil {
-				errorsCh <- err
-			}
-		}()
+func (a *App) stopTransports(ctx context.Context, transports []Transport) error {
+	if len(transports) == 0 {
+		return nil
 	}
 
-	if a.grpcServer != nil {
-		shutdowns.Add(1)
+	errorsCh := make(chan error, len(transports))
+	var stops sync.WaitGroup
+	stops.Add(len(transports))
+	for _, transport := range transports {
+		transport := transport
 		go func() {
-			defer shutdowns.Done()
-			if err := a.shutdownGRPCServer(ctx); err != nil {
-				errorsCh <- err
+			defer stops.Done()
+			a.logger.Info("stopping transport", "transport", transport.Name())
+			if err := transport.Stop(ctx); err != nil {
+				errorsCh <- fmt.Errorf("fw: stop transport %q: %w", transport.Name(), err)
 			}
 		}()
 	}
-	shutdowns.Wait()
+	stops.Wait()
 	close(errorsCh)
 
-	var shutdownErrors []error
+	var stopErrors []error
 	for err := range errorsCh {
-		shutdownErrors = append(shutdownErrors, err)
+		stopErrors = append(stopErrors, err)
 	}
-	return errors.Join(shutdownErrors...)
-}
-
-func (a *App) shutdownHTTPServer(ctx context.Context, server *http.Server) error {
-	if err := server.Shutdown(ctx); err != nil {
-		a.logger.Warn("HTTP graceful shutdown failed, forcing close", "error", err)
-		closeErr := server.Close()
-		if closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
-			a.logger.Error("HTTP server force close error", "error", closeErr)
-			closeErr = fmt.Errorf("fw: force close HTTP server: %w", closeErr)
-		} else {
-			closeErr = nil
-		}
-		return errors.Join(fmt.Errorf("fw: gracefully stop HTTP server: %w", err), closeErr)
-	}
-	a.logger.Info("HTTP server stopped gracefully")
-	return nil
-}
-
-func (a *App) shutdownGRPCServer(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
-		a.grpcServer.GracefulStop()
-		close(done)
-	}()
-	select {
-	case <-done:
-		a.logger.Info("gRPC server stopped gracefully")
-		return nil
-	case <-ctx.Done():
-		a.logger.Warn("gRPC graceful stop timed out, forcing stop")
-		a.grpcServer.Stop()
-		<-done
-		return fmt.Errorf("fw: gracefully stop gRPC server: %w", ctx.Err())
-	}
+	return errors.Join(stopErrors...)
 }

@@ -1,4 +1,4 @@
-// Package chi provides a fw.Router adapter for the go-chi/chi router.
+// Package chi provides an fwhttp.Router adapter for the go-chi/chi router.
 //
 // Usage:
 //
@@ -6,13 +6,14 @@
 //
 //	r := chi.NewRouter()
 //	r.Use(otelchi.Middleware("my-service"))
-//	app := fw.New(fw.WithHTTP(fw.HTTPConfig{Router: fwchi.NewRouter(r)}))
+//	httpTransport := fwhttp.New(fwhttp.Config{Router: fwchi.NewRouter(r)})
+//	app := fw.New(fw.WithTransport(httpTransport))
 package chi
 
 import (
 	"net/http"
 
-	"github.com/charlesonunze/fw"
+	fwhttp "github.com/charlesonunze/fw/transport/http"
 	chi "github.com/go-chi/chi/v5"
 )
 
@@ -20,8 +21,8 @@ type chiRouter struct {
 	r chi.Router
 }
 
-// NewRouter wraps a pre-configured chi.Router as an fw.Router.
-func NewRouter(r chi.Router) fw.Router {
+// NewRouter wraps a pre-configured chi.Router as an fwhttp.Router.
+func NewRouter(r chi.Router) fwhttp.Router {
 	return &chiRouter{r: r}
 }
 
@@ -37,7 +38,7 @@ func (c *chiRouter) Handle(method, path string, h http.HandlerFunc) {
 	c.r.Method(method, path, h)
 }
 
-func (c *chiRouter) Group(prefix string, middleware ...func(http.Handler) http.Handler) fw.Router {
+func (c *chiRouter) Group(prefix string, middleware ...func(http.Handler) http.Handler) fwhttp.Router {
 	sub := chi.NewRouter()
 	for _, m := range middleware {
 		sub.Use(m)

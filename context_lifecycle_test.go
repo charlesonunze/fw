@@ -3,7 +3,6 @@ package fw
 import (
 	"context"
 	"errors"
-	"net"
 	"reflect"
 	"strings"
 	"sync"
@@ -207,28 +206,23 @@ func TestStopDuringStartupCancelsModuleInit(t *testing.T) {
 	assertBefore(t, events, "stop module todo", "close module todo")
 }
 
-func TestTransportListenFailureDoesNotStartRunners(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen() error = %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-
+func TestTransportPreparationFailureDoesNotStartRunners(t *testing.T) {
 	recorder := &eventRecorder{}
 	var runnerStarted atomic.Bool
+	prepareErr := errors.New("address already in use")
 	module := &listenFailureModule{
 		managedModule: managedModule{name: "todo", recorder: recorder},
 		runnerStarted: &runnerStarted,
 	}
 	app := New(
-		WithHTTP(HTTPConfig{Addr: listener.Addr().String(), Router: &noopRouter{}}),
+		WithTransport(&managedTransport{name: "http", prepareErr: prepareErr}),
 		WithLogger(discardLogger{}),
 	)
 	app.RegisterModules(module)
 
-	err = app.Start(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "failed to listen on HTTP addr") {
-		t.Fatalf("Start() error = %v, want HTTP listen error", err)
+	err := app.Start(context.Background())
+	if !errors.Is(err, prepareErr) {
+		t.Fatalf("Start() error = %v, want transport preparation error", err)
 	}
 	if runnerStarted.Load() {
 		t.Fatal("module runner started before transports were prepared")
@@ -237,14 +231,20 @@ func TestTransportListenFailureDoesNotStartRunners(t *testing.T) {
 
 func TestContextCancellationGracefullyStopsTransports(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	httpRun := make(chan struct{})
+	grpcRun := make(chan struct{})
+	httpStopped := make(chan struct{})
+	grpcStopped := make(chan struct{})
 	app := New(
-		WithHTTP(HTTPConfig{Addr: "127.0.0.1:0", Router: &noopRouter{}}),
-		WithGRPC(GRPCConfig{Addr: "127.0.0.1:0"}),
+		WithTransport(&managedTransport{name: "http", runStarted: httpRun, stopped: httpStopped}),
+		WithTransport(&managedTransport{name: "grpc", runStarted: grpcRun, stopped: grpcStopped}),
 		WithLogger(discardLogger{}),
 	)
 
 	done := make(chan error, 1)
 	go func() { done <- app.Start(ctx) }()
+	waitForSignal(t, httpRun, "HTTP transport")
+	waitForSignal(t, grpcRun, "gRPC transport")
 	waitForAppState(t, app, appStateRunning)
 	cancel()
 
@@ -256,6 +256,23 @@ func TestContextCancellationGracefullyStopsTransports(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("transports did not stop after context cancellation")
 	}
+	waitForSignal(t, httpStopped, "HTTP transport stop")
+	waitForSignal(t, grpcStopped, "gRPC transport stop")
+}
+
+func TestTransportFailureStopsApplicationAndPropagates(t *testing.T) {
+	runErr := errors.New("listener failed")
+	stopped := make(chan struct{})
+	app := New(
+		WithTransport(&managedTransport{name: "http", runErr: runErr, stopped: stopped}),
+		WithLogger(discardLogger{}),
+	)
+
+	err := app.Start(context.Background())
+	if !errors.Is(err, runErr) {
+		t.Fatalf("Start() error = %v, want transport failure", err)
+	}
+	waitForSignal(t, stopped, "transport stop")
 }
 
 func TestReadinessIsUnavailableWhileStopping(t *testing.T) {
@@ -276,7 +293,7 @@ func TestReadinessIsUnavailableWhileStopping(t *testing.T) {
 	stopDone := make(chan error, 1)
 	go func() { stopDone <- app.Stop(context.Background()) }()
 	waitForSignal(t, stopStarted, "module stop")
-	if app.evaluateHealth(context.Background()).healthy {
+	if app.evaluateHealth(context.Background()).Healthy {
 		t.Fatal("application remained ready while stopping")
 	}
 	close(releaseStop)
@@ -291,6 +308,38 @@ func TestReadinessIsUnavailableWhileStopping(t *testing.T) {
 type listenFailureModule struct {
 	managedModule
 	runnerStarted *atomic.Bool
+}
+
+type managedTransport struct {
+	name       string
+	prepareErr error
+	runErr     error
+	runStarted chan struct{}
+	stopped    chan struct{}
+}
+
+func (t *managedTransport) Name() string { return t.name }
+
+func (t *managedTransport) Prepare(context.Context, TransportDeps) error {
+	return t.prepareErr
+}
+
+func (t *managedTransport) Run(ctx context.Context) error {
+	if t.runStarted != nil {
+		close(t.runStarted)
+	}
+	if t.runErr != nil {
+		return t.runErr
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (t *managedTransport) Stop(context.Context) error {
+	if t.stopped != nil {
+		close(t.stopped)
+	}
+	return nil
 }
 
 func (m *listenFailureModule) Run(context.Context) error {

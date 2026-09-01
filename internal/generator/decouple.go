@@ -52,14 +52,14 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 		return fmt.Errorf("inspect module transport: %w", err)
 	}
 	if !supported {
-		interfaceName := "HTTPModule"
+		interfaceName := "fwhttp.Module"
 		methodName := "RegisterRoutes"
 		if transport == "grpc" {
-			interfaceName = "GRPCModule"
+			interfaceName = "fwgrpc.Module"
 			methodName = "RegisterGRPC"
 		}
 		return fmt.Errorf(
-			"module %q does not implement fw.%s: add %s before decoupling with --transport %s",
+			"module %q does not implement %s: add %s before decoupling with --transport %s",
 			name,
 			interfaceName,
 			methodName,
@@ -248,7 +248,7 @@ func validTransportMethod(function *ast.FuncType, imports map[string]string, tra
 		return false
 	}
 	parameter := function.Params.List[0].Type
-	wantImport := "github.com/charlesonunze/fw"
+	wantImport := "github.com/charlesonunze/fw/transport/http"
 	wantType := "Router"
 	if transport == "grpc" {
 		pointer, ok := parameter.(*ast.StarExpr)
@@ -442,6 +442,7 @@ import (
 
 	"github.com/charlesonunze/fw"
 	{{- if eq .Transport "http" }}
+	fwhttp "github.com/charlesonunze/fw/transport/http"
 	{{- if eq .Router "chi" }}
 	fwrouter "github.com/charlesonunze/fw/adapters/chi"
 	"github.com/go-chi/chi/v5"
@@ -449,6 +450,8 @@ import (
 	fwrouter "github.com/charlesonunze/fw/adapters/gin"
 	"github.com/gin-gonic/gin"
 	{{- end }}
+	{{- else }}
+	fwgrpc "github.com/charlesonunze/fw/transport/grpc"
 	{{- end }}
 	{{ .Name }} "{{ .ModuleName }}/internal"
 )
@@ -464,21 +467,21 @@ func main() {
 	router := gin.New()
 	{{- end }}
 	app := fw.New(
-		fw.WithHTTP(fw.HTTPConfig{
+		fw.WithTransport(fwhttp.New(fwhttp.Config{
 			Addr:   "{{ .Port }}",
 			Router: fwrouter.NewRouter(router),
-		}),
+		})),
 	)
 	{{- else }}
 	app := fw.New(
-		fw.WithGRPC(fw.GRPCConfig{Addr: "{{ .Port }}"}),
+		fw.WithTransport(fwgrpc.New(fwgrpc.Config{Addr: "{{ .Port }}"})),
 	)
 	{{- end }}
 	module := {{ .Name }}.New()
 	{{- if eq .Transport "http" }}
-	var _ fw.HTTPModule = module
+	var _ fwhttp.Module = module
 	{{- else }}
-	var _ fw.GRPCModule = module
+	var _ fwgrpc.Module = module
 	{{- end }}
 
 	app.RegisterModules(

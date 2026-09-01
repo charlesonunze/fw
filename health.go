@@ -12,9 +12,11 @@ type moduleHealthState struct {
 	errorMessage string
 }
 
-type healthReport struct {
-	healthy bool
-	modules map[string]bool
+// HealthReport is the sanitized application health state exposed to transports.
+// Module errors are intentionally omitted and only logged on transitions.
+type HealthReport struct {
+	Healthy bool
+	Modules map[string]bool
 }
 
 type healthEvaluator struct {
@@ -26,20 +28,20 @@ func newHealthEvaluator() *healthEvaluator {
 	return &healthEvaluator{states: make(map[string]moduleHealthState)}
 }
 
-func (a *App) evaluateHealth(ctx context.Context) healthReport {
+func (a *App) evaluateHealth(ctx context.Context) HealthReport {
 	ctx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
 	defer cancel()
 
-	report := healthReport{
-		healthy: a.ready.Load(),
-		modules: make(map[string]bool, len(a.modules)),
+	report := HealthReport{
+		Healthy: a.ready.Load(),
+		Modules: make(map[string]bool, len(a.modules)),
 	}
 	for _, module := range a.modules {
 		err := module.Health(ctx)
 		healthy := err == nil
-		report.modules[module.Name()] = healthy
+		report.Modules[module.Name()] = healthy
 		if !healthy {
-			report.healthy = false
+			report.Healthy = false
 		}
 		a.health.record(a.logger, module.Name(), err)
 	}
