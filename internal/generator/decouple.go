@@ -434,7 +434,11 @@ func restructureModule(name, modPath, moduleName, output string) error {
 var decoupleCmdTmpl = `package main
 
 import (
+	"context"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/charlesonunze/fw"
 	{{- if eq .Transport "http" }}
@@ -450,6 +454,9 @@ import (
 )
 
 func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	{{- if eq .Transport "http" }}
 	{{- if eq .Router "chi" }}
 	router := chi.NewRouter()
@@ -478,7 +485,7 @@ func main() {
 		module,
 	)
 
-	if err := app.Start(); err != nil {
+	if err := app.Start(ctx); err != nil {
 		log.Fatal(err)
 	}
 }

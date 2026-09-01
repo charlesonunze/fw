@@ -219,7 +219,7 @@ func (m *Module) Register(deps *fw.Deps) error {
 }
 
 // Init completes the module's internal wiring.
-func (m *Module) Init(_ *fw.Deps) error {
+func (m *Module) Init(_ context.Context, _ *fw.Deps) error {
 	m.handler = NewHTTPHandler(m.service)
 	return nil
 }

@@ -1,6 +1,7 @@
 package fw
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -117,7 +118,7 @@ func TestAppUseRequiresHTTPTransport(t *testing.T) {
 	if app.httpConfig != nil {
 		t.Fatal("app.Use enabled the HTTP transport")
 	}
-	err := app.Start()
+	err := app.Start(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "app.Use requires HTTP transport configuration") {
 		t.Fatalf("Start() error = %v, want missing HTTP transport error", err)
 	}

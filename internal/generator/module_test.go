@@ -64,7 +64,7 @@ func TestNewModuleCreatesFlatPrefixedPackage(t *testing.T) {
 	}
 	for _, declaration := range []string{
 		"func (m *Module) Register(deps *fw.Deps) error",
-		"func (m *Module) Init(_ *fw.Deps) error",
+		"func (m *Module) Init(_ context.Context, _ *fw.Deps) error",
 	} {
 		if !strings.Contains(string(wiring), declaration) {
 			t.Errorf("generated module missing %q:\n%s", declaration, wiring)

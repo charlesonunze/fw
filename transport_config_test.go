@@ -15,11 +15,11 @@ type multiTransportModule struct {
 	healthErr         error
 }
 
-func (*multiTransportModule) Name() string                   { return "multi" }
-func (*multiTransportModule) Register(*Deps) error           { return nil }
-func (*multiTransportModule) Init(*Deps) error               { return nil }
-func (m *multiTransportModule) Health(context.Context) error { return m.healthErr }
-func (*multiTransportModule) Close() error                   { return nil }
+func (*multiTransportModule) Name() string                      { return "multi" }
+func (*multiTransportModule) Register(*Deps) error              { return nil }
+func (*multiTransportModule) Init(context.Context, *Deps) error { return nil }
+func (m *multiTransportModule) Health(context.Context) error    { return m.healthErr }
+func (*multiTransportModule) Close() error                      { return nil }
 
 func (m *multiTransportModule) RegisterRoutes(Router) {
 	m.httpRegistrations++
