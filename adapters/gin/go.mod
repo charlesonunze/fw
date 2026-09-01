@@ -5,7 +5,7 @@ go 1.25.13
 replace github.com/charlesonunze/fw => ../../
 
 require (
-	github.com/charlesonunze/fw v0.3.0
+	github.com/charlesonunze/fw v0.4.0
 	github.com/gin-gonic/gin v1.12.0
 )
 
