@@ -1,9 +1,7 @@
 package generator
 
 import (
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 )
 
@@ -14,7 +12,14 @@ type moduleData struct {
 }
 
 // NewModule generates a flat, self-contained module package.
-func NewModule(name, modPath string) error {
+func NewModule(name, modPath string) (err error) {
+	if err := validateModuleName(name); err != nil {
+		return err
+	}
+	if err := validateModulePath(modPath); err != nil {
+		return err
+	}
+
 	data := moduleData{
 		Name:       name,
 		Pascal:     pascal(name),
@@ -22,11 +27,13 @@ func NewModule(name, modPath string) error {
 	}
 
 	base := filepath.Join("internal", "modules", name)
-	if _, err := os.Stat(base); err == nil {
-		return fmt.Errorf("module %q already exists at %s", name, base)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("check module path %s: %w", base, err)
+	if err := validateLocalDirectoryPath(filepath.Dir(base)); err != nil {
+		return err
 	}
+	if err := createGeneratedDir(base); err != nil {
+		return err
+	}
+	defer cleanupGeneratedDir(base, &err)
 
 	files := []struct {
 		path string
@@ -42,7 +49,7 @@ func NewModule(name, modPath string) error {
 
 	for _, file := range files {
 		fmt.Printf("  create %s\n", file.path)
-		if err := writeTemplate(file.path, file.tmpl, data); err != nil {
+		if err = writeTemplate(file.path, file.tmpl, data); err != nil {
 			return err
 		}
 	}

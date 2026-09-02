@@ -1,15 +1,20 @@
 package generator
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
+	"go/version"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+
+	"golang.org/x/mod/modfile"
 )
 
 type decoupleData struct {
@@ -30,7 +35,13 @@ type clientData struct {
 }
 
 // DecoupleModule generates a new standalone project for the target module.
-func DecoupleModule(name, modPath, output, port, transport, router, localFWPath string) error {
+func DecoupleModule(name, modPath, output, port, transport, router, localFWPath string) (err error) {
+	if err := validateModuleName(name); err != nil {
+		return err
+	}
+	if err := validateModulePath(modPath); err != nil {
+		return err
+	}
 	if transport != "http" && transport != "grpc" {
 		return fmt.Errorf("unsupported transport %q: use http or grpc", transport)
 	}
@@ -38,6 +49,19 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 		if err := validateRouter(router); err != nil {
 			return err
 		}
+	}
+	replacementRouter := router
+	if transport == "grpc" {
+		replacementRouter = ""
+	}
+	if localFWPath != "" {
+		if _, err := validateLocalReplacements(replacementRouter, localFWPath); err != nil {
+			return err
+		}
+	}
+	exposedPort, err := validatePort(port)
+	if err != nil {
+		return err
 	}
 
 	// 1. Verify source module exists and supports the selected transport.
@@ -68,8 +92,9 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 	}
 
 	// 2. Guard output path
-	if _, err := os.Stat(output); err == nil {
-		return fmt.Errorf("output directory %q already exists", output)
+	sourceDir := filepath.Join("internal", "modules", name)
+	if err := validateOutputPath(output, sourceDir); err != nil {
+		return err
 	}
 
 	// 3. Detect cross-module dependencies
@@ -84,15 +109,19 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 		Pascal:      pascal(name),
 		ModuleName:  name + "-service",
 		Port:        port,
-		ExposedPort: strings.TrimPrefix(port, ":"),
+		ExposedPort: exposedPort,
 		GoVersion:   goVersion,
 		Router:      router,
 		Transport:   transport,
 	}
+	if err := createGeneratedDir(output); err != nil {
+		return err
+	}
+	defer cleanupGeneratedDir(output, &err)
 
 	// 4. Restructure module files into a flat internal/ layout with rewritten imports
 	fmt.Printf("  copy   internal/modules/%s → %s/internal/\n", name, output)
-	if err := restructureModule(name, modPath, data.ModuleName, output); err != nil {
+	if err = restructureModule(name, modPath, data.ModuleName, output); err != nil {
 		return fmt.Errorf("failed to restructure module: %w", err)
 	}
 
@@ -120,7 +149,7 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 			tmpl = clientGRPCTmpl
 		}
 
-		if err := writeTemplate(clientPath, tmpl, cd); err != nil {
+		if err = writeTemplate(clientPath, tmpl, cd); err != nil {
 			return err
 		}
 	}
@@ -136,25 +165,21 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 
 	for _, f := range scaffoldedFiles {
 		fmt.Printf("  create %s\n", f.relPath)
-		if err := writeTemplate(filepath.Join(output, f.relPath), f.tmpl, data); err != nil {
+		if err = writeTemplate(filepath.Join(output, f.relPath), f.tmpl, data); err != nil {
 			return err
 		}
 	}
-	if err := writeDevelopmentFiles(output); err != nil {
+	if err = writeDevelopmentFiles(output); err != nil {
 		return err
 	}
 
 	// Write go.mod (not a template — content is built dynamically)
 	fmt.Printf("  create go.mod\n")
-	if err := writeGoMod(output, data.ModuleName, data.GoVersion); err != nil {
+	if err = writeGoMod(output, data.ModuleName, data.GoVersion); err != nil {
 		return err
 	}
 	if localFWPath != "" {
-		replacementRouter := router
-		if transport == "grpc" {
-			replacementRouter = ""
-		}
-		if err := addLocalReplacements(output, replacementRouter, localFWPath); err != nil {
+		if err = addLocalReplacements(output, replacementRouter, localFWPath); err != nil {
 			return err
 		}
 	}
@@ -180,12 +205,20 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 
 func findModuleFile(name string) (string, error) {
 	base := filepath.Join("internal", "modules", name)
+	if err := validateLocalDirectoryPath(base); err != nil {
+		return "", err
+	}
+	if info, err := os.Lstat(base); err != nil {
+		return "", err
+	} else if !info.IsDir() {
+		return "", fmt.Errorf("module path %s is not a directory", base)
+	}
 	candidates := []string{
 		filepath.Join(base, name+"_module.go"),
 		filepath.Join(base, "module.go"),
 	}
 	for _, path := range candidates {
-		if _, err := os.Stat(path); err == nil {
+		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
 			return path, nil
 		}
 	}
@@ -194,12 +227,20 @@ func findModuleFile(name string) (string, error) {
 
 func findServiceFile(name string) (string, error) {
 	base := filepath.Join("internal", "modules", name)
+	if err := validateLocalDirectoryPath(base); err != nil {
+		return "", err
+	}
+	if info, err := os.Lstat(base); err != nil {
+		return "", err
+	} else if !info.IsDir() {
+		return "", fmt.Errorf("module path %s is not a directory", base)
+	}
 	candidates := []string{
 		filepath.Join(base, name+"_service.go"),
 		filepath.Join(base, "service", name+"_service.go"),
 	}
 	for _, path := range candidates {
-		if _, err := os.Stat(path); err == nil {
+		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
 			return path, nil
 		}
 	}
@@ -213,11 +254,17 @@ func moduleSupportsTransport(name, transport string) (bool, error) {
 	}
 
 	dir := filepath.Join("internal", "modules", name)
-	moduleType := ""
-	supportedReceivers := make(map[string]bool)
+	var moduleType typeReference
+	supportedReceivers := make(map[string]methodSet)
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if err != nil {
 			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 && strings.HasSuffix(path, ".go") {
+			return fmt.Errorf("refuse to inspect symlinked Go file %s", path)
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		if err != nil {
@@ -230,17 +277,68 @@ func moduleSupportsTransport(name, transport string) (bool, error) {
 				continue
 			}
 			if function.Recv == nil && function.Name.Name == "New" && fieldCount(function.Type.Params) == 0 && fieldCount(function.Type.Results) == 1 {
-				moduleType = receiverName(function.Type.Results.List[0].Type)
+				moduleType, _ = referenceType(function.Type.Results.List[0].Type)
 				continue
 			}
 			if function.Recv != nil && function.Name.Name == methodName && validTransportMethod(function.Type, imports, transport) {
-				receiver := receiverName(function.Recv.List[0].Type)
-				supportedReceivers[receiver] = true
+				receiver, ok := referenceType(function.Recv.List[0].Type)
+				if !ok {
+					continue
+				}
+				methods := supportedReceivers[receiver.name]
+				if receiver.pointerDepth == 1 {
+					methods.pointer = true
+				} else if receiver.pointerDepth == 0 {
+					methods.value = true
+				}
+				supportedReceivers[receiver.name] = methods
 			}
 		}
 		return nil
 	})
-	return moduleType != "" && supportedReceivers[moduleType], err
+	if err != nil || moduleType.name == "" {
+		return false, err
+	}
+	methods := supportedReceivers[moduleType.name]
+	if moduleType.pointerDepth == 1 {
+		return methods.pointer || methods.value, nil
+	}
+	if moduleType.pointerDepth == 0 {
+		return methods.value, nil
+	}
+	return false, nil
+}
+
+type typeReference struct {
+	name         string
+	pointerDepth int
+}
+
+type methodSet struct {
+	value   bool
+	pointer bool
+}
+
+func referenceType(expression ast.Expr) (typeReference, bool) {
+	switch value := expression.(type) {
+	case *ast.Ident:
+		return typeReference{name: value.Name}, true
+	case *ast.ParenExpr:
+		return referenceType(value.X)
+	case *ast.StarExpr:
+		reference, ok := referenceType(value.X)
+		if !ok {
+			return typeReference{}, false
+		}
+		reference.pointerDepth++
+		return reference, true
+	case *ast.IndexExpr:
+		return referenceType(value.X)
+	case *ast.IndexListExpr:
+		return referenceType(value.X)
+	default:
+		return typeReference{}, false
+	}
 }
 
 func validTransportMethod(function *ast.FuncType, imports map[string]string, transport string) bool {
@@ -307,8 +405,14 @@ func detectDeps(name, modPath string) ([]string, error) {
 
 	dir := filepath.Join("internal", "modules", name)
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") {
+		if err != nil {
 			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 && strings.HasSuffix(path, ".go") {
+			return fmt.Errorf("refuse to inspect symlinked Go file %s", path)
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
 		}
 
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
@@ -323,6 +427,9 @@ func detectDeps(name, modPath string) ([]string, error) {
 			}
 			remainder := strings.TrimPrefix(importPath, importPrefix)
 			dep, _, _ := strings.Cut(remainder, "/")
+			if err := validateModuleName(dep); err != nil {
+				return fmt.Errorf("invalid module dependency in import %q: %w", importPath, err)
+			}
 			if dep != name && !seen[dep] {
 				seen[dep] = true
 				deps = append(deps, dep)
@@ -337,6 +444,11 @@ func detectDeps(name, modPath string) ([]string, error) {
 
 // extractMethods returns exported business methods declared on a service type.
 func extractMethods(path string) ([]string, error) {
+	if info, err := os.Lstat(path); err != nil {
+		return nil, err
+	} else if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("refuse to inspect non-regular Go file %s", path)
+	}
 	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 	if err != nil {
 		return nil, err
@@ -361,14 +473,11 @@ func extractMethods(path string) ([]string, error) {
 }
 
 func receiverName(expr ast.Expr) string {
-	switch value := expr.(type) {
-	case *ast.Ident:
-		return value.Name
-	case *ast.StarExpr:
-		return receiverName(value.X)
-	default:
+	reference, ok := referenceType(expr)
+	if !ok {
 		return ""
 	}
+	return reference.name
 }
 
 // detectGoVersion reads the go version from the current project's go.mod.
@@ -377,23 +486,18 @@ func detectGoVersion() string {
 	if err != nil {
 		return "1.21"
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "go ") {
-			return strings.TrimPrefix(line, "go ")
-		}
+	file, err := modfile.ParseLax("go.mod", data, nil)
+	if err != nil || file.Go == nil || !version.IsValid("go"+file.Go.Version) {
+		return "1.21"
 	}
-	return "1.21"
+	return file.Go.Version
 }
 
 // writeGoMod writes a minimal go.mod for the new standalone project.
 func writeGoMod(output, moduleName, goVersion string) error {
-	content := fmt.Sprintf("module %s\n\ngo %s\n\nrequire github.com/charlesonunze/fw v0.0.0\n", moduleName, goVersion)
+	content := fmt.Sprintf("module %s\n\ngo %s\n", moduleName, goVersion)
 	path := filepath.Join(output, "go.mod")
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	return writeFileExclusive(path, []byte(content), 0o644)
 }
 
 // restructureModule copies a module into the standalone service's internal
@@ -404,8 +508,14 @@ func restructureModule(name, modPath, moduleName, output string) error {
 	newImportRoot := moduleName + "/internal"
 
 	return filepath.Walk(srcBase, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") {
+		if err != nil {
 			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 && strings.HasSuffix(path, ".go") {
+			return fmt.Errorf("refuse to copy symlinked Go file %s", path)
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
 		}
 
 		rel, err := filepath.Rel(srcBase, path)
@@ -420,13 +530,42 @@ func restructureModule(name, modPath, moduleName, output string) error {
 			return err
 		}
 
-		rewritten := strings.ReplaceAll(string(content), oldImportRoot, newImportRoot)
-
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		rewritten, err := rewriteModuleImports(path, content, oldImportRoot, newImportRoot)
+		if err != nil {
 			return err
 		}
-		return os.WriteFile(dst, []byte(rewritten), 0o644)
+		return writeFileExclusive(dst, rewritten, 0o644)
 	})
+}
+
+func rewriteModuleImports(path string, content []byte, oldRoot, newRoot string) ([]byte, error) {
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, path, content, parser.ParseComments)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	changed := false
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			return nil, fmt.Errorf("parse import in %s: %w", path, err)
+		}
+		if importPath != oldRoot && !strings.HasPrefix(importPath, oldRoot+"/") {
+			continue
+		}
+		spec.Path.Value = strconv.Quote(newRoot + strings.TrimPrefix(importPath, oldRoot))
+		changed = true
+	}
+	if !changed {
+		return content, nil
+	}
+
+	var rewritten bytes.Buffer
+	if err := format.Node(&rewritten, fileSet, file); err != nil {
+		return nil, fmt.Errorf("format rewritten file %s: %w", path, err)
+	}
+	return rewritten.Bytes(), nil
 }
 
 // --- Templates ---
@@ -513,7 +652,9 @@ ENTRYPOINT ["/bin/{{ .Name }}"]
 var clientHTTPTmpl = `package {{ .DepName }}
 
 import (
+	{{- if .Methods }}
 	"context"
+	{{- end }}
 	"net/http"
 )
 
@@ -546,10 +687,13 @@ func (c *HTTPClient) {{ . }}(ctx context.Context) error {
 var clientGRPCTmpl = `package {{ .DepName }}
 
 import (
+	{{- if .Methods }}
 	"context"
+	{{- end }}
+	"errors"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 )
 
 // {{ .DepPascal }}Service is the interface for calling the {{ .DepName }} service remotely.
@@ -565,14 +709,28 @@ type GRPCClient struct {
 	conn *grpc.ClientConn
 }
 
-// New creates a new GRPCClient connected to the given address.
-// Example: New("user-service:50051")
-func New(addr string) (*GRPCClient, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+// New creates a GRPCClient connected with caller-provided transport credentials.
+// GRPCClient owns the connection; callers must call Close when finished.
+func New(addr string, transportCredentials credentials.TransportCredentials, options ...grpc.DialOption) (*GRPCClient, error) {
+	if transportCredentials == nil {
+		return nil, errors.New("gRPC transport credentials are required")
+	}
+	dialOptions := make([]grpc.DialOption, 0, len(options)+1)
+	dialOptions = append(dialOptions, grpc.WithTransportCredentials(transportCredentials))
+	dialOptions = append(dialOptions, options...)
+	conn, err := grpc.NewClient(addr, dialOptions...)
 	if err != nil {
 		return nil, err
 	}
 	return &GRPCClient{conn: conn}, nil
+}
+
+// Close releases the client connection.
+func (c *GRPCClient) Close() error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
 }
 {{ range .Methods }}
 // {{ . }} TODO: implement gRPC call to the {{ $.DepName }} service.

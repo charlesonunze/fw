@@ -83,3 +83,22 @@ func TestNewModuleRejectsExistingModule(t *testing.T) {
 		t.Fatal("second NewModule() error = nil, want existing module error")
 	}
 }
+
+func TestNewModuleRejectsUnsafeInputBeforeCreatingFiles(t *testing.T) {
+	workspace := t.TempDir()
+	t.Chdir(workspace)
+
+	if err := NewModule("../user", "example.com/app"); err == nil {
+		t.Fatal("NewModule() error = nil, want invalid module name error")
+	}
+	if _, err := os.Lstat("internal"); !os.IsNotExist(err) {
+		t.Fatalf("module directories created for invalid name; stat error = %v", err)
+	}
+
+	if err := NewModule("user", "example.com/app\nreplace evil.invalid => /tmp"); err == nil {
+		t.Fatal("NewModule() error = nil, want invalid module path error")
+	}
+	if _, err := os.Lstat("internal"); !os.IsNotExist(err) {
+		t.Fatalf("module directories created for invalid module path; stat error = %v", err)
+	}
+}

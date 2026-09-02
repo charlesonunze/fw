@@ -3,6 +3,7 @@ package hotreload
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -39,15 +40,25 @@ tmp_dir = "tmp"
 // existing project configuration. It reports whether a file was created.
 func EnsureConfig(dir string) (bool, error) {
 	path := filepath.Join(dir, ConfigFile)
-	if _, err := os.Stat(path); err == nil {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
 		return false, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("inspect Air configuration: %w", err)
+	}
+	if err != nil {
+		return false, fmt.Errorf("create Air configuration: %w", err)
 	}
 
-	if err := os.WriteFile(path, []byte(airConfig), 0o644); err != nil {
-		return false, fmt.Errorf("write Air configuration: %w", err)
+	written, writeErr := file.WriteString(airConfig)
+	if writeErr == nil && written != len(airConfig) {
+		writeErr = io.ErrShortWrite
 	}
-
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		removeErr := os.Remove(path)
+		if errors.Is(removeErr, os.ErrNotExist) {
+			removeErr = nil
+		}
+		return false, errors.Join(fmt.Errorf("write Air configuration: %w", err), removeErr)
+	}
 	return true, nil
 }

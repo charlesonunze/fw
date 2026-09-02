@@ -1,7 +1,6 @@
 package generator
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,15 +24,25 @@ type projectData struct {
 // NewProject scaffolds a runnable project using the selected router adapter.
 // If localFWPath is non-empty, replace directives point to the local framework
 // and adapter modules.
-func NewProject(name, modulePath, router, localFWPath string) error {
+func NewProject(name, modulePath, router, localFWPath string) (err error) {
+	if err := validateProjectName(name); err != nil {
+		return err
+	}
+	if err := validateModulePath(modulePath); err != nil {
+		return err
+	}
 	if err := validateRouter(router); err != nil {
 		return err
 	}
-	if _, err := os.Stat(name); err == nil {
-		return fmt.Errorf("directory %q already exists", name)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("check project directory %q: %w", name, err)
+	if localFWPath != "" {
+		if _, err := validateLocalReplacements(router, localFWPath); err != nil {
+			return err
+		}
 	}
+	if err := createGeneratedDir(name); err != nil {
+		return err
+	}
+	defer cleanupGeneratedDir(name, &err)
 
 	data := projectData{
 		ProjectName: name,
@@ -43,26 +52,26 @@ func NewProject(name, modulePath, router, localFWPath string) error {
 
 	mainPath := filepath.Join(name, "cmd", "main.go")
 	fmt.Printf("  create %s\n", mainPath)
-	if err := writeTemplate(mainPath, projectMainTmpl, data); err != nil {
+	if err = writeTemplate(mainPath, projectMainTmpl, data); err != nil {
 		return err
 	}
-	if err := writeDevelopmentFiles(name); err != nil {
+	if err = writeDevelopmentFiles(name); err != nil {
 		return err
 	}
 
 	fmt.Printf("  init   go mod\n")
-	if err := runGo(name, "mod", "init", modulePath); err != nil {
+	if err = runGo(name, "mod", "init", modulePath); err != nil {
 		return fmt.Errorf("initialize go module: %w", err)
 	}
 
 	if localFWPath != "" {
-		if err := addLocalReplacements(name, router, localFWPath); err != nil {
+		if err = addLocalReplacements(name, router, localFWPath); err != nil {
 			return err
 		}
 	}
 
 	fmt.Printf("  tidy   go mod\n")
-	if err := runGo(name, "mod", "tidy"); err != nil {
+	if err = runGo(name, "mod", "tidy"); err != nil {
 		return fmt.Errorf("tidy go module: %w", err)
 	}
 
@@ -82,12 +91,9 @@ func validateRouter(router string) error {
 }
 
 func addLocalReplacements(projectDir, router, localFWPath string) error {
-	absFWPath, err := filepath.Abs(localFWPath)
+	absFWPath, err := validateLocalReplacements(router, localFWPath)
 	if err != nil {
-		return fmt.Errorf("resolve local fw path: %w", err)
-	}
-	if _, err := os.Stat(filepath.Join(absFWPath, "go.mod")); err != nil {
-		return fmt.Errorf("local fw path %q does not contain go.mod: %w", absFWPath, err)
+		return err
 	}
 
 	fmt.Printf("  edit   go mod (local replacements)\n")
@@ -98,9 +104,6 @@ func addLocalReplacements(projectDir, router, localFWPath string) error {
 	}
 	if router != "" {
 		adapterPath := filepath.Join(absFWPath, "adapters", router)
-		if _, err := os.Stat(filepath.Join(adapterPath, "go.mod")); err != nil {
-			return fmt.Errorf("local %s adapter path %q does not contain go.mod: %w", router, adapterPath, err)
-		}
 		adapterModule := "github.com/charlesonunze/fw/adapters/" + router
 		args = append(args,
 			"-require="+adapterModule+"@v0.0.0",
@@ -111,6 +114,29 @@ func addLocalReplacements(projectDir, router, localFWPath string) error {
 		return fmt.Errorf("add local module replacements: %w", err)
 	}
 	return nil
+}
+
+func validateLocalReplacements(router, localFWPath string) (string, error) {
+	absFWPath, err := filepath.Abs(localFWPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve local fw path: %w", err)
+	}
+	if info, err := os.Lstat(filepath.Join(absFWPath, "go.mod")); err != nil || !info.Mode().IsRegular() {
+		if err == nil {
+			err = fmt.Errorf("go.mod is not a regular file")
+		}
+		return "", fmt.Errorf("local fw path %q does not contain go.mod: %w", absFWPath, err)
+	}
+	if router != "" {
+		adapterPath := filepath.Join(absFWPath, "adapters", router)
+		if info, err := os.Lstat(filepath.Join(adapterPath, "go.mod")); err != nil || !info.Mode().IsRegular() {
+			if err == nil {
+				err = fmt.Errorf("go.mod is not a regular file")
+			}
+			return "", fmt.Errorf("local %s adapter path %q does not contain go.mod: %w", router, adapterPath, err)
+		}
+	}
+	return absFWPath, nil
 }
 
 func runGo(dir string, args ...string) error {
