@@ -102,6 +102,38 @@ func TestNewProjectCompiles(t *testing.T) {
 	}
 }
 
+func TestNewProjectRejectsUnsafeInputBeforeCreatingFiles(t *testing.T) {
+	workspace := t.TempDir()
+	t.Chdir(workspace)
+
+	if err := NewProject("../escape", "example.com/app", routerChi, ""); err == nil {
+		t.Fatal("NewProject() error = nil, want invalid project name error")
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(workspace), "escape")); !os.IsNotExist(err) {
+		t.Fatalf("unsafe project path was created; stat error = %v", err)
+	}
+
+	if err := NewProject("todo", "example.com/app\nreplace evil.invalid => /tmp", routerChi, ""); err == nil {
+		t.Fatal("NewProject() error = nil, want invalid module path error")
+	}
+	if _, err := os.Lstat("todo"); !os.IsNotExist(err) {
+		t.Fatalf("project was created for invalid module path; stat error = %v", err)
+	}
+}
+
+func TestNewProjectRollsBackFailedGeneration(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+
+	err := NewProject("todo", "example.com/todo", routerChi, "")
+	if err == nil || !strings.Contains(err.Error(), "initialize go module") {
+		t.Fatalf("NewProject() error = %v, want go mod initialization error", err)
+	}
+	if _, statErr := os.Lstat("todo"); !os.IsNotExist(statErr) {
+		t.Fatalf("incomplete project was not removed; stat error = %v", statErr)
+	}
+}
+
 func frameworkRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)

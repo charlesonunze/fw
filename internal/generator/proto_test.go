@@ -33,6 +33,32 @@ func TestNewProtoRequiresModule(t *testing.T) {
 	}
 }
 
+func TestNewProtoRejectsUnsafeInputBeforeCheckingTools(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+
+	if err := NewProto("../user", "example.com/app"); err == nil {
+		t.Fatal("NewProto() error = nil, want invalid module name error")
+	}
+	if _, err := os.Lstat("proto"); !os.IsNotExist(err) {
+		t.Fatalf("proto directory created for invalid name; stat error = %v", err)
+	}
+}
+
+func TestGenerateProtoValidatesAllFilesBeforeCheckingTools(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	writeFixture(t, filepath.Join("proto", "User.proto"), `syntax = "proto3";`)
+
+	err := GenerateProto()
+	if err == nil || !strings.Contains(err.Error(), "invalid proto filename") {
+		t.Fatalf("GenerateProto() error = %v, want invalid filename error", err)
+	}
+	if strings.Contains(err.Error(), "missing protobuf tools") {
+		t.Fatalf("GenerateProto() checked tools before validating files: %v", err)
+	}
+}
+
 func TestProtoTemplateUsesModulePath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "user.proto")
 	data := protoData{Name: "user", Pascal: "User", ModulePath: "example.com/app"}

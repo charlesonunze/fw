@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -68,5 +69,40 @@ func TestEnsureConfigRequiresExistingDirectory(t *testing.T) {
 
 	if _, err := EnsureConfig(dir); err == nil {
 		t.Fatal("EnsureConfig() error = nil, want missing directory error")
+	}
+}
+
+func TestEnsureConfigCreatesAtMostOnceConcurrently(t *testing.T) {
+	dir := t.TempDir()
+	results := make(chan bool, 16)
+	errors := make(chan error, 16)
+
+	var group sync.WaitGroup
+	for range 16 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			created, err := EnsureConfig(dir)
+			results <- created
+			errors <- err
+		}()
+	}
+	group.Wait()
+	close(results)
+	close(errors)
+
+	createdCount := 0
+	for created := range results {
+		if created {
+			createdCount++
+		}
+	}
+	for err := range errors {
+		if err != nil {
+			t.Errorf("EnsureConfig() concurrent error = %v", err)
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("EnsureConfig() created count = %d, want 1", createdCount)
 	}
 }

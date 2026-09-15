@@ -59,7 +59,7 @@ func TestModuleSupportsTransportValidatesNewReturnTypeAndSignature(t *testing.T)
 		want   bool
 	}{
 		{
-			name: "valid",
+			name: "pointer constructor and pointer receiver",
 			source: `package user
 import "google.golang.org/grpc"
 type Module struct{}
@@ -67,6 +67,44 @@ func New() *Module { return &Module{} }
 func (m *Module) RegisterGRPC(*grpc.Server) {}
 `,
 			want: true,
+		},
+		{
+			name: "pointer constructor and value receiver",
+			source: `package user
+import "google.golang.org/grpc"
+type Module struct{}
+func New() *Module { return &Module{} }
+func (m Module) RegisterGRPC(*grpc.Server) {}
+`,
+			want: true,
+		},
+		{
+			name: "value constructor and value receiver",
+			source: `package user
+import "google.golang.org/grpc"
+type Module struct{}
+func New() Module { return Module{} }
+func (m Module) RegisterGRPC(*grpc.Server) {}
+`,
+			want: true,
+		},
+		{
+			name: "value constructor and pointer receiver",
+			source: `package user
+import "google.golang.org/grpc"
+type Module struct{}
+func New() Module { return Module{} }
+func (m *Module) RegisterGRPC(*grpc.Server) {}
+`,
+		},
+		{
+			name: "double pointer constructor has no module method set",
+			source: `package user
+import "google.golang.org/grpc"
+type Module struct{}
+func New() **Module { module := &Module{}; return &module }
+func (m *Module) RegisterGRPC(*grpc.Server) {}
+`,
 		},
 		{
 			name: "wrong receiver",
@@ -110,6 +148,18 @@ func TestDecoupleModuleRejectsInvalidTransport(t *testing.T) {
 	}
 }
 
+func TestDecoupleModuleRejectsInvalidPortBeforeCreatingOutput(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	err := DecoupleModule("user", "example.com/app", "output", ":8080\nEXPOSE 22", "http", routerChi, "")
+	if err == nil || !strings.Contains(err.Error(), "invalid listen address") {
+		t.Fatalf("DecoupleModule() error = %v, want invalid address error", err)
+	}
+	if _, statErr := os.Lstat("output"); !os.IsNotExist(statErr) {
+		t.Fatalf("output created for invalid port; stat error = %v", statErr)
+	}
+}
+
 func TestDecoupleModuleRejectsTransportNotImplementedByModule(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
@@ -144,6 +194,20 @@ import (
 	}
 }
 
+func TestDetectDepsRejectsUnsafeModuleName(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	writeFixture(t, filepath.Join("internal", "modules", "order", "order_service.go"), `package order
+
+import _ "example.com/app/internal/modules/../outside"
+`)
+
+	_, err := detectDeps("order", "example.com/app")
+	if err == nil || !strings.Contains(err.Error(), "invalid module dependency") {
+		t.Fatalf("detectDeps() error = %v, want invalid dependency error", err)
+	}
+}
+
 func TestRestructureModuleSupportsFlatLayout(t *testing.T) {
 	t.Chdir(t.TempDir())
 
@@ -165,6 +229,138 @@ import "example.com/app/internal/modules/order/pb"
 	}
 	if !strings.Contains(string(content), `"order-service/internal/pb"`) {
 		t.Errorf("generated import was not rewritten:\\n%s", content)
+	}
+}
+
+func TestRestructureModuleOnlyRewritesImports(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	source := filepath.Join("internal", "modules", "order", "order_service.go")
+	writeFixture(t, source, `package order
+
+import _ "example.com/app/internal/modules/order/pb"
+
+const documentation = "example.com/app/internal/modules/order/pb"
+`)
+
+	output := filepath.Join("microservices", "order")
+	if err := restructureModule("order", "example.com/app", "order-service", output); err != nil {
+		t.Fatalf("restructureModule() error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(output, "internal", "order_service.go"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(content), `import _ "order-service/internal/pb"`) {
+		t.Errorf("generated import was not rewritten:\n%s", content)
+	}
+	if !strings.Contains(string(content), `const documentation = "example.com/app/internal/modules/order/pb"`) {
+		t.Errorf("non-import string was unexpectedly rewritten:\n%s", content)
+	}
+}
+
+func TestDecoupleModuleRejectsOutputInsideSource(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
+	if err := NewModule("user", "example.com/app"); err != nil {
+		t.Fatalf("NewModule() error = %v", err)
+	}
+
+	output := filepath.Join("internal", "modules", "user", "standalone")
+	err := DecoupleModule("user", "example.com/app", output, ":8080", "http", routerChi, "")
+	if err == nil || !strings.Contains(err.Error(), "inside source") {
+		t.Fatalf("DecoupleModule() error = %v, want source containment error", err)
+	}
+	if _, statErr := os.Lstat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("nested output was created; stat error = %v", statErr)
+	}
+}
+
+func TestDecoupleModuleRollsBackFailedGeneration(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
+	if err := NewModule("user", "example.com/app"); err != nil {
+		t.Fatalf("NewModule() error = %v", err)
+	}
+
+	err := DecoupleModule("user", "example.com/app", "output", ":8080", "http", routerChi, frameworkRoot(t))
+	if err == nil || !strings.Contains(err.Error(), "add local module replacements") {
+		t.Fatalf("DecoupleModule() error = %v, want go mod edit error", err)
+	}
+	if _, statErr := os.Lstat("output"); !os.IsNotExist(statErr) {
+		t.Fatalf("incomplete output was not removed; stat error = %v", statErr)
+	}
+}
+
+func TestGRPCClientTemplateRequiresCredentialsAndClosesConnection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "client.go")
+	data := clientData{DepName: "user", DepPascal: "User", Methods: []string{"GetByID"}}
+	if err := writeTemplate(path, clientGRPCTmpl, data); err != nil {
+		t.Fatalf("writeTemplate() error = %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	for _, want := range []string{
+		"transportCredentials credentials.TransportCredentials",
+		"options ...grpc.DialOption",
+		"func (c *GRPCClient) Close() error",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("generated gRPC client missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(string(content), "credentials/insecure") {
+		t.Errorf("generated gRPC client hardcodes insecure credentials:\n%s", content)
+	}
+	if _, err := parser.ParseFile(token.NewFileSet(), path, content, parser.AllErrors); err != nil {
+		t.Errorf("generated gRPC client is invalid Go: %v\n%s", err, content)
+	}
+}
+
+func TestGRPCClientTemplateCompilesWithAndWithoutMethods(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping generated gRPC client compilation in short mode")
+	}
+	t.Setenv("GOWORK", "off")
+
+	for _, methods := range [][]string{nil, {"GetByID"}} {
+		workspace := t.TempDir()
+		writeFixture(t, filepath.Join(workspace, "go.mod"), `module example.com/client
+
+go 1.25.2
+
+require google.golang.org/grpc v1.83.2
+`)
+		if err := writeTemplate(
+			filepath.Join(workspace, "client.go"),
+			clientGRPCTmpl,
+			clientData{DepName: "user", DepPascal: "User", Methods: methods},
+		); err != nil {
+			t.Fatalf("writeTemplate() error = %v", err)
+		}
+		if err := runGo(workspace, "mod", "tidy"); err != nil {
+			t.Fatalf("tidy generated gRPC client module: %v", err)
+		}
+		if err := runGo(workspace, "test", "./..."); err != nil {
+			t.Fatalf("generated gRPC client with methods %v does not compile: %v", methods, err)
+		}
+	}
+}
+
+func TestWriteGoModDoesNotPinUnreleasedFrameworkVersion(t *testing.T) {
+	output := t.TempDir()
+	if err := writeGoMod(output, "user-service", "1.25.2"); err != nil {
+		t.Fatalf("writeGoMod() error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(output, "go.mod"))
+	if err != nil {
+		t.Fatalf("ReadFile(go.mod) error = %v", err)
+	}
+	if strings.Contains(string(content), "v0.0.0") {
+		t.Errorf("generated go.mod pins v0.0.0 without a replacement:\n%s", content)
 	}
 }
 
