@@ -18,8 +18,8 @@ func TestDecoupleMainTemplateUsesSelectedTransport(t *testing.T) {
 		doNotWant string
 		assertion string
 	}{
-		{name: "http", transport: "http", want: "fw.WithTransport(fwhttp.New(fwhttp.Config{", doNotWant: "fwgrpc", assertion: "var _ fwhttp.Module = module"},
-		{name: "grpc", transport: "grpc", want: "fw.WithTransport(fwgrpc.New(fwgrpc.Config{", doNotWant: "fwrouter", assertion: "var _ fwgrpc.Module = module"},
+		{name: "http", transport: "http", want: "httpTransport := fwhttp.New(fwrouter.NewRouter(router), fwhttp.Config{", doNotWant: "fwgrpc", assertion: "var _ fwhttp.Module = module"},
+		{name: "grpc", transport: "grpc", want: "grpcTransport := fwgrpc.New(fwgrpc.Config{", doNotWant: "fwrouter", assertion: "var _ fwgrpc.Module = module"},
 	}
 
 	for _, tt := range tests {

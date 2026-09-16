@@ -176,12 +176,12 @@ func main() {
 {{- else }}
 	router := gin.New()
 {{- end }}
-	app := fw.New(
-		fw.WithTransport(fwhttp.New(fwhttp.Config{
-			Addr:   ":8080",
-			Router: fwrouter.NewRouter(router),
-		})),
-	)
+	httpTransport := fwhttp.New(fwrouter.NewRouter(router), fwhttp.Config{
+		Addr: ":8080",
+	})
+	app := fw.New(fw.Config{
+		Transports: []fw.Transport{httpTransport},
+	})
 
 	// Register your modules here:
 	// app.RegisterModules(

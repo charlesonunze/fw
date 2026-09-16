@@ -6,8 +6,8 @@
 //
 //	r := chi.NewRouter()
 //	r.Use(otelchi.Middleware("my-service"))
-//	httpTransport := fwhttp.New(fwhttp.Config{Router: fwchi.NewRouter(r)})
-//	app := fw.New(fw.WithTransport(httpTransport))
+//	httpTransport := fwhttp.New(fwchi.NewRouter(r), fwhttp.Config{})
+//	app := fw.New(fw.Config{Transports: []fw.Transport{httpTransport}})
 package chi
 
 import (

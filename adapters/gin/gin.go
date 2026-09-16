@@ -5,8 +5,8 @@
 //	import fwgin "github.com/charlesonunze/fw/adapters/gin"
 //
 //	e := gin.Default()
-//	httpTransport := fwhttp.New(fwhttp.Config{Router: fwgin.NewRouter(e)})
-//	app := fw.New(fw.WithTransport(httpTransport))
+//	httpTransport := fwhttp.New(fwgin.NewRouter(e), fwhttp.Config{})
+//	app := fw.New(fw.Config{Transports: []fw.Transport{httpTransport}})
 package gin
 
 import (

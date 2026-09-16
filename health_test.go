@@ -67,7 +67,7 @@ func (l *healthTestLogger) snapshot() []healthLogEntry {
 func TestHealthSanitizesErrorsAndLogsTransitions(t *testing.T) {
 	logger := &healthTestLogger{}
 	module := &healthTestModule{}
-	app := New(WithLogger(logger))
+	app := New(Config{Logger: logger})
 	app.RegisterModules(module)
 
 	if initial := app.evaluateHealth(context.Background()); !initial.Healthy {
@@ -107,7 +107,7 @@ func TestHealthSanitizesErrorsAndLogsTransitions(t *testing.T) {
 func TestHealthTransitionTrackingIsConcurrent(t *testing.T) {
 	logger := &healthTestLogger{}
 	module := &healthTestModule{healthErr: errors.New("database unavailable")}
-	app := New(WithLogger(logger))
+	app := New(Config{Logger: logger})
 	app.RegisterModules(module)
 
 	const checks = 100

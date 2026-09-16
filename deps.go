@@ -6,7 +6,7 @@ package fw
 // those as services via app.RegisterService() and retrieve them with
 // fw.GetService[T](deps.Services) inside your module.
 type Deps struct {
-	// Logger is the structured logger. Swap the implementation with WithLogger().
+	// Logger is the structured logger configured on the application.
 	Logger Logger
 
 	// Services is the registry for cross-module and infrastructure dependencies.

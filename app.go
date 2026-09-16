@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // App is the application container that manages modules, services, optional
@@ -19,6 +20,7 @@ type App struct {
 	health             *healthEvaluator
 	logger             Logger
 	services           *ServiceRegistry
+	shutdownTimeout    time.Duration
 
 	lifecycleMu   sync.Mutex
 	state         appState
@@ -33,37 +35,36 @@ type App struct {
 	ready         atomic.Bool
 }
 
-// Option configures the App.
-type OptionsFunc func(*App)
+// Config configures an App. Logger defaults to a JSON slog logger,
+// ShutdownTimeout defaults to 30 seconds, and an empty Transports slice creates
+// a worker-only application.
+type Config struct {
+	Logger          Logger
+	Transports      []Transport
+	ShutdownTimeout time.Duration
+}
 
-// New creates a new App with the given options.
-func New(opts ...OptionsFunc) *App {
+// New creates an App from config.
+func New(config Config) *App {
+	shutdownTimeout := config.ShutdownTimeout
+	if shutdownTimeout == 0 {
+		shutdownTimeout = defaultShutdownTimeout
+	}
+
 	a := &App{
-		health:   newHealthEvaluator(),
-		services: NewServiceRegistry(),
-		state:    appStateNew,
-		stopCh:   make(chan struct{}),
-		stopped:  make(chan struct{}),
+		transports:      append([]Transport(nil), config.Transports...),
+		health:          newHealthEvaluator(),
+		logger:          config.Logger,
+		services:        NewServiceRegistry(),
+		shutdownTimeout: shutdownTimeout,
+		state:           appStateNew,
+		stopCh:          make(chan struct{}),
+		stopped:         make(chan struct{}),
 	}
 	// Unit-level health evaluation remains useful before a transport is started.
 	// Start marks the app unavailable until startup completes.
 	a.ready.Store(true)
-	for _, opt := range opts {
-		opt(a)
-	}
 	return a
-}
-
-// WithTransport installs an optional application transport such as HTTP or
-// gRPC. Transports prepare and start in option order and stop concurrently.
-func WithTransport(transport Transport) OptionsFunc {
-	return func(a *App) { a.transports = append(a.transports, transport) }
-}
-
-// WithLogger sets a custom logger implementation.
-// If not set, fw uses a JSON slog logger at INFO level.
-func WithLogger(l Logger) OptionsFunc {
-	return func(a *App) { a.logger = l }
 }
 
 // RegisterService registers an external service such as a database, broker, or
@@ -97,6 +98,9 @@ func (a *App) ensureLogger() {
 func (a *App) setup() error {
 	if a.services == nil {
 		a.services = NewServiceRegistry()
+	}
+	if a.shutdownTimeout < 0 {
+		return fmt.Errorf("fw: shutdown timeout cannot be negative")
 	}
 	a.registeredModules = nil
 	a.initializedModules = nil

@@ -99,7 +99,7 @@ func testDeps(modules ...fw.Module) fw.TransportDeps {
 func TestPrepareUsesDefaultsAndRegistersHTTPModules(t *testing.T) {
 	module := &testModule{}
 	router := newTestRouter()
-	transport := New(Config{Addr: "127.0.0.1:0", Router: router})
+	transport := New(router, Config{Addr: "127.0.0.1:0"})
 	if err := transport.Prepare(context.Background(), testDeps(module)); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
@@ -122,10 +122,23 @@ func TestPrepareUsesDefaultsAndRegistersHTTPModules(t *testing.T) {
 	}
 }
 
+func TestNewCopiesMiddleware(t *testing.T) {
+	first := func(next http.Handler) http.Handler { return next }
+	second := func(next http.Handler) http.Handler { return next }
+	middleware := []Middleware{first}
+
+	transport := New(newTestRouter(), Config{Middleware: middleware})
+	middleware[0] = second
+
+	if reflect.ValueOf(transport.config.Middleware[0]).Pointer() != reflect.ValueOf(first).Pointer() {
+		t.Fatal("New() retained the caller's middleware slice")
+	}
+}
+
 func TestPreparePreservesCustomServerSettings(t *testing.T) {
 	router := newTestRouter()
 	server := &http.Server{ReadHeaderTimeout: time.Second, IdleTimeout: time.Minute}
-	transport := New(Config{Addr: "127.0.0.1:0", Router: router, Server: server})
+	transport := New(router, Config{Addr: "127.0.0.1:0", Server: server})
 	if err := transport.Prepare(context.Background(), testDeps()); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
@@ -140,7 +153,7 @@ func TestPreparePreservesCustomServerSettings(t *testing.T) {
 }
 
 func TestPrepareRequiresRouter(t *testing.T) {
-	transport := New(Config{})
+	transport := New(nil, Config{})
 	err := transport.Prepare(context.Background(), testDeps())
 	if err == nil || !strings.Contains(err.Error(), "requires a router") {
 		t.Fatalf("Prepare() error = %v, want missing router error", err)
@@ -157,9 +170,8 @@ func TestPrepareBindFailureDoesNotMutateRouterOrServer(t *testing.T) {
 	router := newTestRouter()
 	server := &http.Server{}
 	module := &testModule{}
-	transport := New(Config{
+	transport := New(router, Config{
 		Addr:   occupied.Addr().String(),
-		Router: router,
 		Server: server,
 	})
 	if err := transport.Prepare(context.Background(), testDeps(module)); err == nil {
@@ -188,9 +200,8 @@ func TestMiddlewareOrderAndShortCircuit(t *testing.T) {
 	router.fallback = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		events = append(events, "handler")
 	})
-	transport := New(Config{
+	transport := New(router, Config{
 		Addr:       "127.0.0.1:0",
-		Router:     router,
 		Middleware: []Middleware{record("one"), record("two")},
 	})
 	if err := transport.Prepare(context.Background(), testDeps()); err != nil {
@@ -211,9 +222,8 @@ func TestMiddlewareOrderAndShortCircuit(t *testing.T) {
 	handlerCalled := false
 	shortRouter := newTestRouter()
 	shortRouter.fallback = http.HandlerFunc(func(http.ResponseWriter, *http.Request) { handlerCalled = true })
-	short := New(Config{
-		Addr:   "127.0.0.1:0",
-		Router: shortRouter,
+	short := New(shortRouter, Config{
+		Addr: "127.0.0.1:0",
 		Middleware: []Middleware{func(http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				http.Error(w, "blocked", http.StatusUnauthorized)
@@ -233,7 +243,7 @@ func TestMiddlewareOrderAndShortCircuit(t *testing.T) {
 
 func TestHealthEndpointsExposeOnlySanitizedStatus(t *testing.T) {
 	router := newTestRouter()
-	transport := New(Config{Addr: "127.0.0.1:0", Router: router})
+	transport := New(router, Config{Addr: "127.0.0.1:0"})
 	deps := testDeps()
 	deps.Health = func(context.Context) fw.HealthReport {
 		return fw.HealthReport{Healthy: false, Modules: map[string]bool{"user": false}}
@@ -286,9 +296,8 @@ func TestPrepareRejectsInvalidMiddlewareBeforeRegisteringRoutes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			router := newTestRouter()
-			transport := New(Config{
+			transport := New(router, Config{
 				Addr:       "127.0.0.1:0",
-				Router:     router,
 				Middleware: []Middleware{tt.middleware},
 			})
 			if err := transport.Prepare(context.Background(), testDeps(&testModule{})); err == nil {
@@ -310,7 +319,7 @@ func TestStopForcesActiveRequestsClosedAfterDeadline(t *testing.T) {
 		<-request.Context().Done()
 		close(requestStopped)
 	})
-	transport := New(Config{Addr: "127.0.0.1:0", Router: router})
+	transport := New(router, Config{Addr: "127.0.0.1:0"})
 	if err := transport.Prepare(context.Background(), testDeps()); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}

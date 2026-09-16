@@ -23,14 +23,14 @@ func TestProjectMainTemplateSupportsRouters(t *testing.T) {
 			router:     routerChi,
 			wantImport: `"github.com/go-chi/chi/v5"`,
 			wantSetup:  "router := chi.NewRouter()",
-			wantConfig: "fw.WithTransport(fwhttp.New(fwhttp.Config{",
+			wantConfig: "app := fw.New(fw.Config{",
 		},
 		{
 			name:       "gin",
 			router:     routerGin,
 			wantImport: `"github.com/gin-gonic/gin"`,
 			wantSetup:  "router := gin.New()",
-			wantConfig: "fw.WithTransport(fwhttp.New(fwhttp.Config{",
+			wantConfig: "app := fw.New(fw.Config{",
 		},
 	}
 

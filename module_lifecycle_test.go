@@ -80,7 +80,7 @@ func TestModuleRegistrationOrderDoesNotAffectDependencyResolution(t *testing.T) 
 		initFn: func(*Deps) error { return nil },
 	}
 
-	app := New(WithLogger(discardLogger{}))
+	app := New(Config{Logger: discardLogger{}})
 	app.RegisterModules(todo, auth, user)
 	if err := app.setup(); err != nil {
 		t.Fatalf("setup() error = %v", err)

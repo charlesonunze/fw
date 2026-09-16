@@ -60,7 +60,7 @@ func TestStartClosesResourcesAfterModuleInitFailure(t *testing.T) {
 	failing := &lifecycleModule{name: "auth", initErr: errors.New("broken wiring"), events: &events}
 	pending := &lifecycleModule{name: "user", events: &events}
 
-	app := New(WithLogger(discardLogger{}))
+	app := New(Config{Logger: discardLogger{}})
 	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {
 		t.Fatalf("RegisterService(postgres) error = %v", err)
 	}
@@ -96,7 +96,7 @@ func TestStartClosesResourcesAfterModuleRegistrationFailure(t *testing.T) {
 	failing := &lifecycleModule{name: "auth", registerErr: errors.New("duplicate service"), events: &events}
 	skipped := &lifecycleModule{name: "user", events: &events}
 
-	app := New(WithLogger(discardLogger{}))
+	app := New(Config{Logger: discardLogger{}})
 	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {
 		t.Fatalf("RegisterService() error = %v", err)
 	}
@@ -122,7 +122,10 @@ func TestStartClosesResourcesAfterModuleRegistrationFailure(t *testing.T) {
 func TestStartClosesPreRegisteredServicesAfterSetupFailure(t *testing.T) {
 	var events []string
 	var transport *lifecycleTransport
-	app := New(WithTransport(transport), WithLogger(discardLogger{}))
+	app := New(Config{
+		Logger:     discardLogger{},
+		Transports: []Transport{transport},
+	})
 	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {
 		t.Fatalf("RegisterService() error = %v", err)
 	}
@@ -142,10 +145,10 @@ func TestStartClosesResourcesAfterTransportPreparationFailure(t *testing.T) {
 	service := &lifecycleService{name: "postgres", events: &events}
 	module := &lifecycleModule{name: "user", events: &events}
 	prepareErr := errors.New("address already in use")
-	app := New(
-		WithTransport(&lifecycleTransport{prepareErr: prepareErr}),
-		WithLogger(discardLogger{}),
-	)
+	app := New(Config{
+		Logger:     discardLogger{},
+		Transports: []Transport{&lifecycleTransport{prepareErr: prepareErr}},
+	})
 	if err := app.RegisterService(service); err != nil {
 		t.Fatalf("RegisterService() error = %v", err)
 	}
@@ -171,11 +174,10 @@ func TestStartStopsOnlySuccessfullyPreparedTransports(t *testing.T) {
 	prepareErr := errors.New("address already in use")
 	first := &recordingTransport{name: "http", events: &events}
 	second := &recordingTransport{name: "grpc", events: &events, prepareErr: prepareErr}
-	app := New(
-		WithTransport(first),
-		WithTransport(second),
-		WithLogger(discardLogger{}),
-	)
+	app := New(Config{
+		Logger:     discardLogger{},
+		Transports: []Transport{first, second},
+	})
 
 	err := app.Start(context.Background())
 	if !errors.Is(err, prepareErr) {

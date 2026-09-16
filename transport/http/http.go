@@ -24,14 +24,13 @@ const (
 // Middleware wraps an HTTP handler.
 type Middleware func(http.Handler) http.Handler
 
-// Config configures an HTTP transport. Router is required and Addr defaults to
-// ":8888". A framework-created server uses conservative header-read and idle
-// timeouts. When Server is provided, the transport owns its lifecycle, sets its
-// Addr and Handler, and leaves all other settings unchanged.
+// Config configures an HTTP transport. Addr defaults to ":8888". A
+// framework-created server uses conservative header-read and idle timeouts.
+// When Server is provided, the transport owns its lifecycle, sets its Addr and
+// Handler, and leaves all other settings unchanged.
 type Config struct {
 	Name       string
 	Addr       string
-	Router     Router
 	Server     *http.Server
 	Middleware []Middleware
 }
@@ -39,6 +38,7 @@ type Config struct {
 // Transport owns one HTTP server runtime.
 type Transport struct {
 	config Config
+	router Router
 
 	mu       sync.Mutex
 	logger   fw.Logger
@@ -51,10 +51,11 @@ type Transport struct {
 	stopErr  error
 }
 
-// New creates an HTTP transport from config. Network resources are acquired by
-// Prepare when the application starts.
-func New(config Config) *Transport {
-	return &Transport{config: config}
+// New creates an HTTP transport using router and config. Network resources are
+// acquired by Prepare when the application starts.
+func New(router Router, config Config) *Transport {
+	config.Middleware = append([]Middleware(nil), config.Middleware...)
+	return &Transport{config: config, router: router}
 }
 
 // Name returns the transport's operational name.
@@ -71,7 +72,7 @@ func (t *Transport) Prepare(ctx context.Context, deps fw.TransportDeps) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if t.config.Router == nil {
+	if t.router == nil {
 		return errors.New("http transport requires a router")
 	}
 	if deps.Health == nil {
@@ -87,7 +88,7 @@ func (t *Transport) Prepare(ctx context.Context, deps fw.TransportDeps) error {
 		return errors.New("http transport is already prepared")
 	}
 
-	var handler http.Handler = t.config.Router
+	var handler http.Handler = t.router
 	for i := len(t.config.Middleware) - 1; i >= 0; i-- {
 		if t.config.Middleware[i] == nil {
 			return fmt.Errorf("http middleware %d is nil", i)
@@ -115,11 +116,11 @@ func (t *Transport) Prepare(ctx context.Context, deps fw.TransportDeps) error {
 
 	for _, module := range deps.Modules {
 		if httpModule, ok := module.(Module); ok {
-			httpModule.RegisterRoutes(t.config.Router)
+			httpModule.RegisterRoutes(t.router)
 		}
 	}
-	t.config.Router.Get("/health/live", livenessHandler())
-	t.config.Router.Get("/health/ready", readinessHandler(deps.Health))
+	t.router.Get("/health/live", livenessHandler())
+	t.router.Get("/health/ready", readinessHandler(deps.Health))
 
 	server := t.config.Server
 	if server == nil {
