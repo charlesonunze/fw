@@ -232,7 +232,7 @@ func (a *App) shutdownStartup(trigger shutdownTrigger, startupErr error, transpo
 	a.ready.Store(false)
 	a.cancelRuntime(trigger.cause)
 
-	ctx, cancel := shutdownContext(trigger.shutdownContext)
+	ctx, cancel := a.shutdownContext(trigger.shutdownContext)
 	defer cancel()
 
 	// Runners have not started yet. Prepared transports and modules whose Init
@@ -246,7 +246,7 @@ func (a *App) shutdownRunning(trigger shutdownTrigger, transports []Transport, c
 	a.ready.Store(false)
 	components.stopping.Store(true)
 
-	ctx, cancel := shutdownContext(trigger.shutdownContext)
+	ctx, cancel := a.shutdownContext(trigger.shutdownContext)
 	defer cancel()
 
 	transportDone := make(chan error, 1)
@@ -282,11 +282,11 @@ func (a *App) cancelRuntime(cause error) {
 	}
 }
 
-func shutdownContext(parent context.Context) (context.Context, context.CancelFunc) {
+func (a *App) shutdownContext(parent context.Context) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	return context.WithTimeout(parent, defaultShutdownTimeout)
+	return context.WithTimeout(parent, a.shutdownTimeout)
 }
 
 func cancellationError(ctx context.Context, err error) bool {

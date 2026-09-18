@@ -162,7 +162,7 @@ func TestServiceRegistryReportsAmbiguousConcreteType(t *testing.T) {
 
 func TestAppRegisterServiceReturnsErrorsImmediately(t *testing.T) {
 	closed := 0
-	app := New(WithLogger(discardLogger{}))
+	app := New(Config{Logger: discardLogger{}})
 	first := &registryService{name: "postgres", closed: &closed}
 	if err := app.RegisterService(first, As[registryPublisher]()); err != nil {
 		t.Fatalf("first RegisterService() error = %v", err)

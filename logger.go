@@ -8,7 +8,7 @@ import (
 
 // Logger is the logging interface fw passes to modules.
 // The default implementation wraps log/slog.
-// Swap it out with WithLogger() to use zap, zerolog, etc.
+// Set Config.Logger to an adapter for zap, zerolog, or another logger.
 type Logger interface {
 	Info(msg string, args ...any)
 	Error(msg string, args ...any)

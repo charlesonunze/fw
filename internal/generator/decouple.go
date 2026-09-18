@@ -605,16 +605,17 @@ func main() {
 	{{- else }}
 	router := gin.New()
 	{{- end }}
-	app := fw.New(
-		fw.WithTransport(fwhttp.New(fwhttp.Config{
-			Addr:   "{{ .Port }}",
-			Router: fwrouter.NewRouter(router),
-		})),
-	)
+	httpTransport := fwhttp.New(fwrouter.NewRouter(router), fwhttp.Config{
+		Addr: "{{ .Port }}",
+	})
+	app := fw.New(fw.Config{
+		Transports: []fw.Transport{httpTransport},
+	})
 	{{- else }}
-	app := fw.New(
-		fw.WithTransport(fwgrpc.New(fwgrpc.Config{Addr: "{{ .Port }}"})),
-	)
+	grpcTransport := fwgrpc.New(fwgrpc.Config{Addr: "{{ .Port }}"})
+	app := fw.New(fw.Config{
+		Transports: []fw.Transport{grpcTransport},
+	})
 	{{- end }}
 	module := {{ .Name }}.New()
 	{{- if eq .Transport "http" }}

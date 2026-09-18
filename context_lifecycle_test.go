@@ -120,7 +120,7 @@ func TestStartAndStopCoordinateComponentLifecycle(t *testing.T) {
 	serviceStarted := make(chan struct{})
 	module := &managedModule{name: "todo", recorder: recorder, runStarted: moduleStarted}
 	service := &managedService{name: "postgres", recorder: recorder, runStarted: serviceStarted}
-	app := New(WithLogger(discardLogger{}))
+	app := New(Config{Logger: discardLogger{}})
 	if err := app.RegisterService(service); err != nil {
 		t.Fatalf("RegisterService() error = %v", err)
 	}
@@ -156,7 +156,7 @@ func TestRunnerFailureStopsApplicationAndPropagates(t *testing.T) {
 	recorder := &eventRecorder{}
 	module := &managedModule{name: "notification", recorder: recorder, runErr: runErr}
 	service := &managedService{name: "rabbitmq", recorder: recorder}
-	app := New(WithLogger(discardLogger{}))
+	app := New(Config{Logger: discardLogger{}})
 	if err := app.RegisterService(service); err != nil {
 		t.Fatalf("RegisterService() error = %v", err)
 	}
@@ -185,7 +185,7 @@ func TestStopDuringStartupCancelsModuleInit(t *testing.T) {
 		initStarted: initStarted,
 		blockInit:   true,
 	}
-	app := New(WithLogger(discardLogger{}))
+	app := New(Config{Logger: discardLogger{}})
 	app.RegisterModules(module)
 
 	startDone := make(chan error, 1)
@@ -214,10 +214,10 @@ func TestTransportPreparationFailureDoesNotStartRunners(t *testing.T) {
 		managedModule: managedModule{name: "todo", recorder: recorder},
 		runnerStarted: &runnerStarted,
 	}
-	app := New(
-		WithTransport(&managedTransport{name: "http", prepareErr: prepareErr}),
-		WithLogger(discardLogger{}),
-	)
+	app := New(Config{
+		Logger:     discardLogger{},
+		Transports: []Transport{&managedTransport{name: "http", prepareErr: prepareErr}},
+	})
 	app.RegisterModules(module)
 
 	err := app.Start(context.Background())
@@ -235,11 +235,13 @@ func TestContextCancellationGracefullyStopsTransports(t *testing.T) {
 	grpcRun := make(chan struct{})
 	httpStopped := make(chan struct{})
 	grpcStopped := make(chan struct{})
-	app := New(
-		WithTransport(&managedTransport{name: "http", runStarted: httpRun, stopped: httpStopped}),
-		WithTransport(&managedTransport{name: "grpc", runStarted: grpcRun, stopped: grpcStopped}),
-		WithLogger(discardLogger{}),
-	)
+	app := New(Config{
+		Logger: discardLogger{},
+		Transports: []Transport{
+			&managedTransport{name: "http", runStarted: httpRun, stopped: httpStopped},
+			&managedTransport{name: "grpc", runStarted: grpcRun, stopped: grpcStopped},
+		},
+	})
 
 	done := make(chan error, 1)
 	go func() { done <- app.Start(ctx) }()
@@ -263,10 +265,10 @@ func TestContextCancellationGracefullyStopsTransports(t *testing.T) {
 func TestTransportFailureStopsApplicationAndPropagates(t *testing.T) {
 	runErr := errors.New("listener failed")
 	stopped := make(chan struct{})
-	app := New(
-		WithTransport(&managedTransport{name: "http", runErr: runErr, stopped: stopped}),
-		WithLogger(discardLogger{}),
-	)
+	app := New(Config{
+		Logger:     discardLogger{},
+		Transports: []Transport{&managedTransport{name: "http", runErr: runErr, stopped: stopped}},
+	})
 
 	err := app.Start(context.Background())
 	if !errors.Is(err, runErr) {
@@ -283,7 +285,7 @@ func TestReadinessIsUnavailableWhileStopping(t *testing.T) {
 		stopStarted:   stopStarted,
 		releaseStop:   releaseStop,
 	}
-	app := New(WithLogger(discardLogger{}))
+	app := New(Config{Logger: discardLogger{}})
 	app.RegisterModules(module)
 
 	startDone := make(chan error, 1)
@@ -378,7 +380,7 @@ func TestLifecycleAggregatesStopAndCloseErrors(t *testing.T) {
 		name: "postgres", recorder: recorder,
 		stopErr: serviceStopErr, closeErr: serviceCloseErr,
 	}
-	app := New(WithLogger(discardLogger{}))
+	app := New(Config{Logger: discardLogger{}})
 	if err := app.RegisterService(service); err != nil {
 		t.Fatalf("RegisterService() error = %v", err)
 	}
@@ -396,7 +398,7 @@ func TestLifecycleLogsStateTransitions(t *testing.T) {
 	logger := &healthTestLogger{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	app := New(WithLogger(logger))
+	app := New(Config{Logger: logger})
 
 	if err := app.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -423,7 +425,7 @@ func TestLifecycleLogsStateTransitions(t *testing.T) {
 }
 
 func TestLifecycleRejectsInvalidCalls(t *testing.T) {
-	app := New(WithLogger(discardLogger{}))
+	app := New(Config{Logger: discardLogger{}})
 	if err := app.Stop(context.Background()); err == nil || !strings.Contains(err.Error(), "has not been started") {
 		t.Fatalf("Stop() before Start error = %v", err)
 	}
