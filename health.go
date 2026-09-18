@@ -37,13 +37,14 @@ func (a *App) evaluateHealth(ctx context.Context) HealthReport {
 		Modules: make(map[string]bool, len(a.modules)),
 	}
 	for _, module := range a.modules {
+		name := string(module.Name())
 		err := module.Health(ctx)
 		healthy := err == nil
-		report.Modules[module.Name()] = healthy
+		report.Modules[name] = healthy
 		if !healthy {
 			report.Healthy = false
 		}
-		a.health.record(a.logger, module.Name(), err)
+		a.health.record(a.logger, name, err)
 	}
 	return report
 }

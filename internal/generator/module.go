@@ -211,13 +211,19 @@ type Module struct {
 	handler *HTTPHandler
 }
 
+// Name identifies the {{ .Name }} module.
+const Name fw.ModuleName = "{{ .Name }}"
+
 // New creates a {{ .Name }} module.
 func New() *Module {
 	return &Module{}
 }
 
 // Name returns the module name.
-func (m *Module) Name() string { return "{{ .Name }}" }
+func (m *Module) Name() fw.ModuleName { return Name }
+
+// Imports declares this module's direct dependencies.
+func (m *Module) Imports() []fw.ModuleName { return nil }
 
 // Register constructs and exposes the module's services.
 func (m *Module) Register(deps *fw.Deps) error {

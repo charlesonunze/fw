@@ -30,6 +30,7 @@ func (r *eventRecorder) snapshot() []string {
 
 type managedModule struct {
 	name        string
+	imports     []ModuleName
 	recorder    *eventRecorder
 	initStarted chan struct{}
 	blockInit   bool
@@ -39,7 +40,8 @@ type managedModule struct {
 	closeErr    error
 }
 
-func (m *managedModule) Name() string { return m.name }
+func (m *managedModule) Name() ModuleName      { return ModuleName(m.name) }
+func (m *managedModule) Imports() []ModuleName { return m.imports }
 
 func (m *managedModule) Register(*Deps) error {
 	m.recorder.add("register module " + m.name)

@@ -26,6 +26,7 @@ type serviceRegistration struct {
 type serviceProvider struct {
 	name    string
 	service Service
+	owner   ModuleName
 }
 
 // As exposes a service through the interface T in addition to its concrete type.
@@ -49,17 +50,55 @@ func As[T any]() RegistrationOption {
 
 // ServiceRegistry is a thread-safe container for services. Names identify
 // services operationally, while exact Go types are used for dependency lookup.
+// Module lifecycle dependencies receive scoped views backed by the same state.
 type ServiceRegistry struct {
+	initMu sync.Mutex
+	state  *serviceRegistryState
+	scope  *serviceScope
+}
+
+type serviceRegistryState struct {
 	mu        sync.RWMutex
 	services  map[string]Service
 	providers map[reflect.Type][]serviceProvider
 }
 
+type serviceScope struct {
+	owner   ModuleName
+	imports map[ModuleName]struct{}
+}
+
 // NewServiceRegistry creates a new empty ServiceRegistry.
 func NewServiceRegistry() *ServiceRegistry {
 	return &ServiceRegistry{
+		state: newServiceRegistryState(),
+	}
+}
+
+func newServiceRegistryState() *serviceRegistryState {
+	return &serviceRegistryState{
 		services:  make(map[string]Service),
 		providers: make(map[reflect.Type][]serviceProvider),
+	}
+}
+
+func (r *ServiceRegistry) sharedState() *serviceRegistryState {
+	r.initMu.Lock()
+	defer r.initMu.Unlock()
+	if r.state == nil {
+		r.state = newServiceRegistryState()
+	}
+	return r.state
+}
+
+func (r *ServiceRegistry) forModule(owner ModuleName, imports []ModuleName) *ServiceRegistry {
+	allowed := make(map[ModuleName]struct{}, len(imports))
+	for _, imported := range imports {
+		allowed[imported] = struct{}{}
+	}
+	return &ServiceRegistry{
+		state: r.sharedState(),
+		scope: &serviceScope{owner: owner, imports: allowed},
 	}
 }
 
@@ -91,34 +130,50 @@ func (r *ServiceRegistry) Register(svc Service, options ...RegistrationOption) e
 		}
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.ensureMaps()
+	state := r.sharedState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.ensureMaps()
 
-	if _, exists := r.services[name]; exists {
+	if _, exists := state.services[name]; exists {
 		return fmt.Errorf("service %q already registered", name)
 	}
 	for _, alias := range registration.aliases {
-		if providers := r.providers[alias]; len(providers) > 0 {
+		if providers := state.providers[alias]; len(providers) > 0 {
 			return fmt.Errorf("fw: provider type %v already exposed by service %q", alias, providers[0].name)
 		}
 	}
 
-	provider := serviceProvider{name: name, service: svc}
-	r.services[name] = svc
-	r.providers[concrete] = append(r.providers[concrete], provider)
+	provider := serviceProvider{name: name, service: svc, owner: r.owner()}
+	state.services[name] = svc
+	state.providers[concrete] = append(state.providers[concrete], provider)
 	for _, alias := range registration.aliases {
-		r.providers[alias] = []serviceProvider{provider}
+		state.providers[alias] = []serviceProvider{provider}
 	}
 	return nil
 }
 
-func (r *ServiceRegistry) ensureMaps() {
-	if r.services == nil {
-		r.services = make(map[string]Service)
+func (r *ServiceRegistry) owner() ModuleName {
+	if r.scope == nil {
+		return ""
 	}
-	if r.providers == nil {
-		r.providers = make(map[reflect.Type][]serviceProvider)
+	return r.scope.owner
+}
+
+func (r *ServiceRegistry) canAccess(owner ModuleName) bool {
+	if r.scope == nil || owner == "" || owner == r.scope.owner {
+		return true
+	}
+	_, allowed := r.scope.imports[owner]
+	return allowed
+}
+
+func (s *serviceRegistryState) ensureMaps() {
+	if s.services == nil {
+		s.services = make(map[string]Service)
+	}
+	if s.providers == nil {
+		s.providers = make(map[reflect.Type][]serviceProvider)
 	}
 }
 
@@ -144,15 +199,25 @@ func GetService[T any](reg *ServiceRegistry) (T, error) {
 	}
 
 	target := reflect.TypeFor[T]()
-	reg.mu.RLock()
-	providers := reg.providers[target]
+	state := reg.sharedState()
+	state.mu.RLock()
+	registered := state.providers[target]
+	providers := make([]serviceProvider, 0, len(registered))
+	for _, provider := range registered {
+		if reg.canAccess(provider.owner) {
+			providers = append(providers, provider)
+		}
+	}
 	switch len(providers) {
 	case 0:
-		reg.mu.RUnlock()
+		state.mu.RUnlock()
+		if len(registered) > 0 && reg.scope != nil {
+			return zero, fmt.Errorf("fw: module %q cannot access provider type %v from a module it does not import", reg.scope.owner, target)
+		}
 		return zero, fmt.Errorf("fw: provider type %v is not registered", target)
 	case 1:
 		service := providers[0].service
-		reg.mu.RUnlock()
+		state.mu.RUnlock()
 		provider, ok := any(service).(T)
 		if !ok {
 			return zero, fmt.Errorf("fw: provider type %v has incompatible value %T", target, service)
@@ -163,7 +228,7 @@ func GetService[T any](reg *ServiceRegistry) (T, error) {
 		for _, provider := range providers {
 			names = append(names, provider.name)
 		}
-		reg.mu.RUnlock()
+		state.mu.RUnlock()
 		return zero, fmt.Errorf(
 			"fw: provider type %v is ambiguous across services %s; expose distinct interfaces with fw.As",
 			target,

@@ -22,12 +22,14 @@ func (s *lifecycleService) Close() error {
 
 type lifecycleModule struct {
 	name        string
+	imports     []ModuleName
 	registerErr error
 	initErr     error
 	events      *[]string
 }
 
-func (m *lifecycleModule) Name() string { return m.name }
+func (m *lifecycleModule) Name() ModuleName      { return ModuleName(m.name) }
+func (m *lifecycleModule) Imports() []ModuleName { return m.imports }
 
 func (m *lifecycleModule) Register(*Deps) error {
 	*m.events = append(*m.events, "register module "+m.name)
@@ -57,8 +59,11 @@ func (l discardLogger) With(...any) Logger { return l }
 func TestStartClosesResourcesAfterModuleInitFailure(t *testing.T) {
 	var events []string
 	initialized := &lifecycleModule{name: "todo", events: &events}
-	failing := &lifecycleModule{name: "auth", initErr: errors.New("broken wiring"), events: &events}
-	pending := &lifecycleModule{name: "user", events: &events}
+	failing := &lifecycleModule{
+		name: "auth", imports: []ModuleName{"todo"},
+		initErr: errors.New("broken wiring"), events: &events,
+	}
+	pending := &lifecycleModule{name: "user", imports: []ModuleName{"auth"}, events: &events}
 
 	app := New(Config{Logger: discardLogger{}})
 	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {
@@ -93,8 +98,11 @@ func TestStartClosesResourcesAfterModuleInitFailure(t *testing.T) {
 func TestStartClosesResourcesAfterModuleRegistrationFailure(t *testing.T) {
 	var events []string
 	registered := &lifecycleModule{name: "todo", events: &events}
-	failing := &lifecycleModule{name: "auth", registerErr: errors.New("duplicate service"), events: &events}
-	skipped := &lifecycleModule{name: "user", events: &events}
+	failing := &lifecycleModule{
+		name: "auth", imports: []ModuleName{"todo"},
+		registerErr: errors.New("duplicate service"), events: &events,
+	}
+	skipped := &lifecycleModule{name: "user", imports: []ModuleName{"auth"}, events: &events}
 
 	app := New(Config{Logger: discardLogger{}})
 	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {

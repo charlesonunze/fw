@@ -20,6 +20,7 @@ type App struct {
 	health             *healthEvaluator
 	logger             Logger
 	services           *ServiceRegistry
+	moduleScopes       map[ModuleName]*ServiceRegistry
 	shutdownTimeout    time.Duration
 
 	lifecycleMu   sync.Mutex
@@ -82,8 +83,8 @@ func (a *App) RegisterService(svc Service, options ...RegistrationOption) error 
 	return nil
 }
 
-// RegisterModules adds modules to the app.
-// fw calls Register on every module before calling Init on any module.
+// RegisterModules adds modules to the app. Argument order does not control
+// lifecycle order; fw derives that from each module's Imports declaration.
 func (a *App) RegisterModules(modules ...Module) {
 	a.modules = append(a.modules, modules...)
 }
@@ -104,6 +105,16 @@ func (a *App) setup() error {
 	}
 	a.registeredModules = nil
 	a.initializedModules = nil
+	ordered, imports, err := orderModules(a.modules)
+	if err != nil {
+		return err
+	}
+	a.modules = ordered
+	a.moduleScopes = make(map[ModuleName]*ServiceRegistry, len(ordered))
+	for _, module := range ordered {
+		name := module.Name()
+		a.moduleScopes[name] = a.services.forModule(name, imports[name])
+	}
 	for i, transport := range a.transports {
 		if isNilTransport(transport) {
 			return fmt.Errorf("fw: transport %d is nil", i)
@@ -112,11 +123,12 @@ func (a *App) setup() error {
 	return nil
 }
 
-// registerModules calls Register on every module before initialization begins.
-func (a *App) registerModules(deps *Deps) error {
+// registerModules calls Register in dependency order before initialization.
+func (a *App) registerModules() error {
 	for _, mod := range a.modules {
 		a.logger.Info("registering module", "module", mod.Name())
 		a.registeredModules = append(a.registeredModules, mod)
+		deps := a.moduleDeps(mod)
 		if err := mod.Register(deps); err != nil {
 			return fmt.Errorf("fw: failed to register module %q: %w", mod.Name(), err)
 		}
@@ -125,15 +137,23 @@ func (a *App) registerModules(deps *Deps) error {
 }
 
 // initModules calls Init after every module has registered its services.
-func (a *App) initModules(ctx context.Context, deps *Deps) error {
+func (a *App) initModules(ctx context.Context) error {
 	for _, mod := range a.registeredModules {
 		a.logger.Info("initializing module", "module", mod.Name())
 		a.initializedModules = append(a.initializedModules, mod)
+		deps := a.moduleDeps(mod)
 		if err := mod.Init(ctx, deps); err != nil {
 			return fmt.Errorf("fw: failed to initialize module %q: %w", mod.Name(), err)
 		}
 	}
 	return nil
+}
+
+func (a *App) moduleDeps(module Module) *Deps {
+	return &Deps{
+		Logger:   a.logger,
+		Services: a.moduleScopes[module.Name()],
+	}
 }
 
 func (a *App) closeResources() error {

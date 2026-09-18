@@ -62,15 +62,14 @@ func (a *App) Start(ctx context.Context) error {
 		return a.shutdownStartup(shutdownTrigger{cause: err}, err, nil)
 	}
 
-	deps := &Deps{Logger: a.logger, Services: a.services}
-	if err := a.registerModules(deps); err != nil {
+	if err := a.registerModules(); err != nil {
 		return a.shutdownStartup(shutdownTrigger{cause: err}, err, nil)
 	}
 	if trigger, ok := a.pendingShutdown(ctx); ok {
 		return a.shutdownStartup(trigger, nil, nil)
 	}
 
-	if err := a.initModules(runtimeCtx, deps); err != nil {
+	if err := a.initModules(runtimeCtx); err != nil {
 		if trigger, ok := a.pendingShutdown(ctx); ok && cancellationError(runtimeCtx, err) {
 			return a.shutdownStartup(trigger, nil, nil)
 		}
@@ -413,7 +412,7 @@ func (a *App) startComponents(ctx context.Context, transports []Transport) *comp
 		if !ok {
 			continue
 		}
-		components.startRunner(ctx, "module", module.Name(), runner, &components.moduleWG)
+		components.startRunner(ctx, "module", string(module.Name()), runner, &components.moduleWG)
 	}
 	for _, service := range a.preRegistered {
 		runner, ok := service.(Runner)

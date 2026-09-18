@@ -69,8 +69,9 @@ func TestServiceRegistryRegisterReturnsErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "already registered") {
 		t.Fatalf("duplicate Register() error = %v, want duplicate error", err)
 	}
-	if got := registry.services["postgres"]; got != first {
-		t.Fatalf("registered service = %p, want original %p", got, first)
+	got, getErr := GetService[*registryService](registry)
+	if getErr != nil || got != first {
+		t.Fatalf("GetService() = %p, %v; want original %p", got, getErr, first)
 	}
 }
 
@@ -123,8 +124,8 @@ func TestServiceRegistryRejectsInvalidInterfaceExposure(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("Register() error = %v, want error containing %q", err, tt.wantErr)
 			}
-			if len(registry.services) != 0 || len(registry.providers) != 0 {
-				t.Fatalf("failed registration mutated registry: services=%d providers=%d", len(registry.services), len(registry.providers))
+			if _, getErr := GetService[*registryService](registry); getErr == nil {
+				t.Fatal("failed registration exposed the service")
 			}
 		})
 	}
@@ -140,8 +141,8 @@ func TestServiceRegistryRejectsDuplicateInterfaceProvider(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "already exposed") {
 		t.Fatalf("duplicate provider Register() error = %v, want duplicate error", err)
 	}
-	if _, exists := registry.services["nats"]; exists {
-		t.Fatal("failed provider registration added service by name")
+	if _, getErr := GetService[*alternateRegistryService](registry); getErr == nil {
+		t.Fatal("failed provider registration exposed the service")
 	}
 }
 
@@ -167,8 +168,9 @@ func TestAppRegisterServiceReturnsErrorsImmediately(t *testing.T) {
 	if err := app.RegisterService(first, As[registryPublisher]()); err != nil {
 		t.Fatalf("first RegisterService() error = %v", err)
 	}
-	if got := app.services.services["postgres"]; got != first {
-		t.Fatalf("immediately registered service = %p, want %p", got, first)
+	got, getErr := GetService[*registryService](app.services)
+	if getErr != nil || got != first {
+		t.Fatalf("immediately registered service = %p, %v; want %p", got, getErr, first)
 	}
 
 	err := app.RegisterService(&registryService{name: "postgres", closed: &closed})

@@ -33,7 +33,8 @@ type testModule struct {
 	registrations int
 }
 
-func (*testModule) Name() string                         { return "user" }
+func (*testModule) Name() fw.ModuleName                  { return "user" }
+func (*testModule) Imports() []fw.ModuleName             { return nil }
 func (*testModule) Register(*fw.Deps) error              { return nil }
 func (*testModule) Init(context.Context, *fw.Deps) error { return nil }
 func (*testModule) Health(context.Context) error         { return nil }
