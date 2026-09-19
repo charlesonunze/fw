@@ -2,6 +2,9 @@ package fw
 
 import "context"
 
+// ModuleName uniquely identifies a module in an application dependency graph.
+type ModuleName string
+
 // Module represents a self-contained application module.
 // Each module owns its domain logic, data layer, and transport handlers.
 //
@@ -9,18 +12,21 @@ import "context"
 // them through type assertions during transport preparation.
 type Module interface {
 	// Name returns the unique module name (e.g. "user", "order").
-	Name() string
+	Name() ModuleName
+
+	// Imports declares the modules whose services this module can resolve.
+	// Imports are direct-only: importing auth does not grant access to modules
+	// imported by auth. fw validates and orders the graph before registration.
+	Imports() []ModuleName
 
 	// Register constructs and exposes the module's services. fw calls Register
-	// on every module before calling Init on any module. Application services
-	// registered with App.RegisterService are already available in deps. Resolve
-	// services owned by other modules during Init, not Register.
+	// in dependency order before calling Init. Application services and services
+	// exposed by directly imported modules are already available in deps.
 	Register(deps *Deps) error
 
-	// Init resolves services exposed by other modules and completes the module's
-	// wiring. Every module service has been registered before Init is called, but
-	// another module's Init may not have run yet. The context is cancelled when
-	// startup is interrupted or application shutdown begins.
+	// Init performs post-registration setup. All module services are complete and
+	// registered before Init begins. The context is cancelled when startup is
+	// interrupted or application shutdown begins.
 	Init(ctx context.Context, deps *Deps) error
 
 	// Health reports whether the module is healthy. fw aggregates results for

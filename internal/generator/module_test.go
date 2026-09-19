@@ -63,6 +63,8 @@ func TestNewModuleCreatesFlatPrefixedPackage(t *testing.T) {
 		t.Fatalf("ReadFile(user_module.go) error = %v", err)
 	}
 	for _, declaration := range []string{
+		`const Name fw.ModuleName = "user"`,
+		"func (m *Module) Imports() []fw.ModuleName",
 		"func (m *Module) Register(deps *fw.Deps) error",
 		"func (m *Module) Init(_ context.Context, _ *fw.Deps) error",
 		"func (m *Module) RegisterRoutes(r fwhttp.Router)",

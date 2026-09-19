@@ -13,7 +13,8 @@ type healthTestModule struct {
 	healthErr error
 }
 
-func (*healthTestModule) Name() string                      { return "health" }
+func (*healthTestModule) Name() ModuleName                  { return "health" }
+func (*healthTestModule) Imports() []ModuleName             { return nil }
 func (*healthTestModule) Register(*Deps) error              { return nil }
 func (*healthTestModule) Init(context.Context, *Deps) error { return nil }
 func (m *healthTestModule) Health(context.Context) error    { return m.healthErr }
@@ -79,7 +80,7 @@ func TestHealthSanitizesErrorsAndLogsTransitions(t *testing.T) {
 
 	module.healthErr = errors.New("database unavailable: password=secret")
 	report := app.evaluateHealth(context.Background())
-	if report.Healthy || report.Modules[module.Name()] {
+	if report.Healthy || report.Modules[string(module.Name())] {
 		t.Fatalf("health report = %+v, want degraded module", report)
 	}
 

@@ -79,7 +79,8 @@ type testModule struct {
 	registrations int
 }
 
-func (*testModule) Name() string                         { return "todo" }
+func (*testModule) Name() fw.ModuleName                  { return "todo" }
+func (*testModule) Imports() []fw.ModuleName             { return nil }
 func (*testModule) Register(*fw.Deps) error              { return nil }
 func (*testModule) Init(context.Context, *fw.Deps) error { return nil }
 func (*testModule) Health(context.Context) error         { return nil }
