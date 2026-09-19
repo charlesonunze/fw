@@ -10,7 +10,7 @@ import (
 
 var generateCmd = &cobra.Command{
 	Use:   "generate",
-	Short: "Generate code (modules, protos, etc.)",
+	Short: "Generate code (modules, services, protos, etc.)",
 }
 
 var generateModuleCmd = &cobra.Command{
@@ -23,6 +23,19 @@ var generateModuleCmd = &cobra.Command{
 			return fmt.Errorf("could not detect Go module path: %w\nAre you in a project root with go.mod?", err)
 		}
 		return generator.NewModule(args[0], modPath)
+	},
+}
+
+var generateServiceCmd = &cobra.Command{
+	Use:   "service <name>",
+	Short: "Generate a standalone application service",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		modPath, err := generator.DetectModulePath(".")
+		if err != nil {
+			return fmt.Errorf("could not detect Go module path: %w\nAre you in a project root with go.mod?", err)
+		}
+		return generator.NewService(args[0], modPath)
 	},
 }
 
@@ -47,6 +60,7 @@ Without arguments: regenerates Go code for all .proto files under proto/.`,
 
 func init() {
 	generateCmd.AddCommand(generateModuleCmd)
+	generateCmd.AddCommand(generateServiceCmd)
 	generateCmd.AddCommand(generateProtoCmd)
 	rootCmd.AddCommand(generateCmd)
 }
