@@ -460,7 +460,7 @@ func extractMethods(path string) ([]string, error) {
 		if !ok || fn.Recv == nil || !fn.Name.IsExported() {
 			continue
 		}
-		if fn.Name.Name == "Name" || fn.Name.Name == "Close" {
+		if fn.Name.Name == "Name" || fn.Name.Name == "Health" || fn.Name.Name == "Close" {
 			continue
 		}
 		receiver := receiverName(fn.Recv.List[0].Type)

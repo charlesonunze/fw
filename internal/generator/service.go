@@ -47,7 +47,11 @@ func NewService(name, modPath string) (err error) {
 
 var serviceTmpl = `package {{ .Name }}
 
-import "github.com/charlesonunze/fw"
+import (
+	"context"
+
+	"github.com/charlesonunze/fw"
+)
 
 // Service is the application-wide {{ .Name }} service.
 type Service struct{}
@@ -59,6 +63,9 @@ func New() *Service {
 
 // Name returns the service registry key.
 func (*Service) Name() string { return "{{ .Name }}" }
+
+// Health reports whether the service is ready.
+func (*Service) Health(context.Context) error { return nil }
 
 // Close releases resources owned by the service.
 func (*Service) Close() error { return nil }

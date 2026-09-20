@@ -20,6 +20,14 @@ func (*healthTestModule) Init(context.Context, *Deps) error { return nil }
 func (m *healthTestModule) Health(context.Context) error    { return m.healthErr }
 func (*healthTestModule) Close() error                      { return nil }
 
+type healthTestService struct {
+	healthErr error
+}
+
+func (*healthTestService) Name() string                   { return "postgres" }
+func (s *healthTestService) Health(context.Context) error { return s.healthErr }
+func (*healthTestService) Close() error                   { return nil }
+
 type healthLogEntry struct {
 	level string
 	msg   string
@@ -68,7 +76,11 @@ func (l *healthTestLogger) snapshot() []healthLogEntry {
 func TestHealthSanitizesErrorsAndLogsTransitions(t *testing.T) {
 	logger := &healthTestLogger{}
 	module := &healthTestModule{}
+	service := &healthTestService{}
 	app := New(Config{Logger: logger})
+	if err := app.RegisterService(service); err != nil {
+		t.Fatalf("RegisterService() error = %v", err)
+	}
 	app.RegisterModules(module)
 
 	if initial := app.evaluateHealth(context.Background()); !initial.Healthy {
@@ -87,21 +99,34 @@ func TestHealthSanitizesErrorsAndLogsTransitions(t *testing.T) {
 	entries := logger.snapshot()
 	assertHealthLog(t, entries, 0, "warn", "module became unhealthy", module.healthErr.Error())
 
+	service.healthErr = errors.New("connection failed: password=secret")
+	app.evaluateHealth(context.Background())
+	entries = logger.snapshot()
+	assertHealthLog(t, entries, 1, "warn", "service became unhealthy", service.healthErr.Error())
+
 	module.healthErr = errors.New("cache unavailable")
 	app.evaluateHealth(context.Background())
 	entries = logger.snapshot()
-	assertHealthLog(t, entries, 1, "warn", "module health error changed", module.healthErr.Error())
+	assertHealthLog(t, entries, 2, "warn", "module health error changed", module.healthErr.Error())
 
 	module.healthErr = nil
+	report = app.evaluateHealth(context.Background())
+	if report.Healthy || !report.Modules[string(module.Name())] || report.Services[service.Name()] {
+		t.Fatalf("partially recovered health report = %+v", report)
+	}
+	entries = logger.snapshot()
+	assertHealthLog(t, entries, 3, "info", "module recovered", "")
+
+	service.healthErr = nil
 	if recovered := app.evaluateHealth(context.Background()); !recovered.Healthy {
 		t.Fatalf("recovered health report = %+v", recovered)
 	}
 	entries = logger.snapshot()
-	assertHealthLog(t, entries, 2, "info", "module recovered", "")
+	assertHealthLog(t, entries, 4, "info", "service recovered", "")
 
 	app.evaluateHealth(context.Background())
-	if got := len(logger.snapshot()); got != 3 {
-		t.Fatalf("log entries after unchanged recovery = %d, want 3", got)
+	if got := len(logger.snapshot()); got != 5 {
+		t.Fatalf("log entries after unchanged recovery = %d, want 5", got)
 	}
 }
 

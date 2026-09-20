@@ -13,7 +13,8 @@ type lifecycleService struct {
 	events *[]string
 }
 
-func (s *lifecycleService) Name() string { return s.name }
+func (s *lifecycleService) Name() string               { return s.name }
+func (*lifecycleService) Health(context.Context) error { return nil }
 
 func (s *lifecycleService) Close() error {
 	*s.events = append(*s.events, "close service "+s.name)

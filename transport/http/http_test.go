@@ -247,7 +247,11 @@ func TestHealthEndpointsExposeOnlySanitizedStatus(t *testing.T) {
 	transport := New(router, Config{Addr: "127.0.0.1:0"})
 	deps := testDeps()
 	deps.Health = func(context.Context) fw.HealthReport {
-		return fw.HealthReport{Healthy: false, Modules: map[string]bool{"user": false}}
+		return fw.HealthReport{
+			Healthy:  false,
+			Modules:  map[string]bool{"user": false},
+			Services: map[string]bool{"postgres": false},
+		}
 	}
 	if err := transport.Prepare(context.Background(), deps); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
@@ -274,6 +278,14 @@ func TestHealthEndpointsExposeOnlySanitizedStatus(t *testing.T) {
 	user, ok := modules["user"].(map[string]any)
 	if !ok || len(user) != 1 || user["status"] != "error" {
 		t.Fatalf("readiness user status = %#v, want sanitized error status", modules["user"])
+	}
+	services, ok := response["services"].(map[string]any)
+	if !ok {
+		t.Fatalf("readiness services = %#v, want object", response["services"])
+	}
+	postgres, ok := services["postgres"].(map[string]any)
+	if !ok || len(postgres) != 1 || postgres["status"] != "error" {
+		t.Fatalf("readiness postgres status = %#v, want sanitized error status", services["postgres"])
 	}
 	if _, exposed := response["error"]; exposed || strings.Contains(string(recorder.body), "secret") {
 		t.Fatalf("readiness response exposed error details: %s", recorder.body)

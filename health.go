@@ -8,24 +8,31 @@ import (
 
 const healthCheckTimeout = 5 * time.Second
 
-type moduleHealthState struct {
+type componentHealthState struct {
 	errorMessage string
 }
 
+type healthComponent struct {
+	kind string
+	name string
+}
+
 // HealthReport is the sanitized application health state exposed to transports.
-// Module errors are intentionally omitted and only logged on transitions.
+// Module and application-service errors are omitted and logged only when their
+// health state changes.
 type HealthReport struct {
-	Healthy bool
-	Modules map[string]bool
+	Healthy  bool
+	Modules  map[string]bool
+	Services map[string]bool
 }
 
 type healthEvaluator struct {
 	mu     sync.Mutex
-	states map[string]moduleHealthState
+	states map[healthComponent]componentHealthState
 }
 
 func newHealthEvaluator() *healthEvaluator {
-	return &healthEvaluator{states: make(map[string]moduleHealthState)}
+	return &healthEvaluator{states: make(map[healthComponent]componentHealthState)}
 }
 
 func (a *App) evaluateHealth(ctx context.Context) HealthReport {
@@ -33,8 +40,9 @@ func (a *App) evaluateHealth(ctx context.Context) HealthReport {
 	defer cancel()
 
 	report := HealthReport{
-		Healthy: a.ready.Load(),
-		Modules: make(map[string]bool, len(a.modules)),
+		Healthy:  a.ready.Load(),
+		Modules:  make(map[string]bool, len(a.modules)),
+		Services: make(map[string]bool, len(a.preRegistered)),
 	}
 	for _, module := range a.modules {
 		name := string(module.Name())
@@ -44,29 +52,40 @@ func (a *App) evaluateHealth(ctx context.Context) HealthReport {
 		if !healthy {
 			report.Healthy = false
 		}
-		a.health.record(a.logger, name, err)
+		a.health.record(a.logger, "module", name, err)
+	}
+	for _, service := range a.preRegistered {
+		name := service.Name()
+		err := service.Health(ctx)
+		healthy := err == nil
+		report.Services[name] = healthy
+		if !healthy {
+			report.Healthy = false
+		}
+		a.health.record(a.logger, "service", name, err)
 	}
 	return report
 }
 
-func (e *healthEvaluator) record(logger Logger, module string, healthErr error) {
+func (e *healthEvaluator) record(logger Logger, kind, name string, healthErr error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	previous, observed := e.states[module]
-	current := moduleHealthState{}
+	component := healthComponent{kind: kind, name: name}
+	previous, observed := e.states[component]
+	current := componentHealthState{}
 	if healthErr != nil {
 		current.errorMessage = healthErr.Error()
 	}
 
 	switch {
 	case healthErr != nil && (!observed || previous.errorMessage == ""):
-		logger.Warn("module became unhealthy", "module", module, "error", healthErr)
+		logger.Warn(kind+" became unhealthy", kind, name, "error", healthErr)
 	case healthErr != nil && previous.errorMessage != current.errorMessage:
-		logger.Warn("module health error changed", "module", module, "error", healthErr)
+		logger.Warn(kind+" health error changed", kind, name, "error", healthErr)
 	case healthErr == nil && observed && previous.errorMessage != "":
-		logger.Info("module recovered", "module", module)
+		logger.Info(kind+" recovered", kind, name)
 	}
 
-	e.states[module] = current
+	e.states[component] = current
 }

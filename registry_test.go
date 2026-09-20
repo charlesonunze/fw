@@ -1,6 +1,7 @@
 package fw
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -14,7 +15,8 @@ func (s *registryService) Name() string {
 	return s.name
 }
 
-func (*registryService) Publish() string { return "published" }
+func (*registryService) Health(context.Context) error { return nil }
+func (*registryService) Publish() string              { return "published" }
 
 func (s *registryService) Close() error {
 	if s.closed != nil {
@@ -35,9 +37,10 @@ type alternateRegistryService struct {
 	name string
 }
 
-func (s *alternateRegistryService) Name() string  { return s.name }
-func (*alternateRegistryService) Publish() string { return "alternate" }
-func (*alternateRegistryService) Close() error    { return nil }
+func (s *alternateRegistryService) Name() string               { return s.name }
+func (*alternateRegistryService) Health(context.Context) error { return nil }
+func (*alternateRegistryService) Publish() string              { return "alternate" }
+func (*alternateRegistryService) Close() error                 { return nil }
 
 func TestServiceRegistryRegisterReturnsErrors(t *testing.T) {
 	tests := []struct {
