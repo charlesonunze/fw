@@ -16,13 +16,18 @@ var generateCmd = &cobra.Command{
 var generateModuleCmd = &cobra.Command{
 	Use:   "module <name>",
 	Short: "Generate a flat, self-contained module with consistently prefixed files",
-	Args:  cobra.ExactArgs(1),
+	Long: `Generate a flat, self-contained module with consistently prefixed files.
+
+Supported transports are http, grpc, and none. HTTP is the default.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		modPath, err := generator.DetectModulePath(".")
 		if err != nil {
 			return fmt.Errorf("could not detect Go module path: %w\nAre you in a project root with go.mod?", err)
 		}
-		return generator.NewModule(args[0], modPath)
+		return generator.NewModule(args[0], modPath, generator.ModuleConfig{
+			Transport: generateModuleTransport,
+		})
 	},
 }
 
@@ -59,8 +64,16 @@ Without arguments: regenerates Go code for all .proto files under proto/.`,
 }
 
 func init() {
+	generateModuleCmd.Flags().StringVar(
+		&generateModuleTransport,
+		"transport",
+		generator.ModuleTransportHTTP,
+		"Module transport: http, grpc, or none",
+	)
 	generateCmd.AddCommand(generateModuleCmd)
 	generateCmd.AddCommand(generateServiceCmd)
 	generateCmd.AddCommand(generateProtoCmd)
 	rootCmd.AddCommand(generateCmd)
 }
+
+var generateModuleTransport string
