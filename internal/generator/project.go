@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -95,15 +96,22 @@ func addLocalReplacements(projectDir, router, localFWPath string) error {
 	if err != nil {
 		return err
 	}
+	relFWPath, err := relativeReplacementPath(projectDir, absFWPath)
+	if err != nil {
+		return fmt.Errorf("resolve local fw replacement: %w", err)
+	}
 
 	fmt.Printf("  edit   go mod (local replacements)\n")
 	args := []string{
 		"mod", "edit",
 		"-require=github.com/charlesonunze/fw@v0.0.0",
-		"-replace=github.com/charlesonunze/fw=" + absFWPath,
+		"-replace=github.com/charlesonunze/fw=" + relFWPath,
 	}
 	if router != "" {
-		adapterPath := filepath.Join(absFWPath, "adapters", router)
+		adapterPath, err := relativeReplacementPath(projectDir, filepath.Join(absFWPath, "adapters", router))
+		if err != nil {
+			return fmt.Errorf("resolve local %s adapter replacement: %w", router, err)
+		}
 		adapterModule := "github.com/charlesonunze/fw/adapters/" + router
 		args = append(args,
 			"-require="+adapterModule+"@v0.0.0",
@@ -114,6 +122,28 @@ func addLocalReplacements(projectDir, router, localFWPath string) error {
 		return fmt.Errorf("add local module replacements: %w", err)
 	}
 	return nil
+}
+
+func relativeReplacementPath(projectDir, target string) (string, error) {
+	absProjectDir, err := filepath.Abs(projectDir)
+	if err != nil {
+		return "", err
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(absProjectDir, absTarget)
+	if err != nil {
+		return "", err
+	}
+	separator := string(filepath.Separator)
+	if relative != "." && relative != ".." &&
+		!strings.HasPrefix(relative, "."+separator) &&
+		!strings.HasPrefix(relative, ".."+separator) {
+		relative = "." + separator + relative
+	}
+	return filepath.ToSlash(relative), nil
 }
 
 func validateLocalReplacements(router, localFWPath string) (string, error) {

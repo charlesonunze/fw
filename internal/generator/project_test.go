@@ -89,6 +89,7 @@ func TestNewProjectCompiles(t *testing.T) {
 			if err := NewProject(project, "example.com/"+project, router, root); err != nil {
 				t.Fatalf("NewProject() error = %v", err)
 			}
+			assertPortableLocalReplacements(t, project, router, root)
 
 			t.Chdir(filepath.Join(workspace, project))
 			assertDevelopmentFiles(t, ".")
@@ -100,6 +101,33 @@ func TestNewProjectCompiles(t *testing.T) {
 			}
 			if err := runGo(".", "test", "./..."); err != nil {
 				t.Fatalf("generated %s project does not compile: %v", router, err)
+			}
+		})
+	}
+}
+
+func TestRelativeReplacementPath(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "apps", "todo")
+
+	tests := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "sibling", target: filepath.Join(root, "apps", "fw"), want: "../fw"},
+		{name: "child", target: filepath.Join(project, "local", "fw"), want: "./local/fw"},
+		{name: "same directory", target: project, want: "."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := relativeReplacementPath(project, tt.target)
+			if err != nil {
+				t.Fatalf("relativeReplacementPath() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("relativeReplacementPath() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -181,4 +209,40 @@ func frameworkRoot(t *testing.T) string {
 		t.Fatal("could not determine generator test path")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func assertPortableLocalReplacements(t *testing.T, projectDir, router, fwPath string) {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(projectDir, "go.mod"))
+	if err != nil {
+		t.Fatalf("ReadFile(go.mod) error = %v", err)
+	}
+	goMod := string(content)
+
+	relFWPath, err := relativeReplacementPath(projectDir, fwPath)
+	if err != nil {
+		t.Fatalf("relativeReplacementPath(fw) error = %v", err)
+	}
+	if filepath.IsAbs(filepath.FromSlash(relFWPath)) {
+		t.Fatalf("fw replacement path is absolute: %q", relFWPath)
+	}
+	wantFW := "replace github.com/charlesonunze/fw => " + relFWPath
+	if !strings.Contains(goMod, wantFW) {
+		t.Fatalf("go.mod missing relative fw replacement %q:\n%s", wantFW, goMod)
+	}
+
+	if router == "" {
+		return
+	}
+	relAdapterPath, err := relativeReplacementPath(projectDir, filepath.Join(fwPath, "adapters", router))
+	if err != nil {
+		t.Fatalf("relativeReplacementPath(adapter) error = %v", err)
+	}
+	if filepath.IsAbs(filepath.FromSlash(relAdapterPath)) {
+		t.Fatalf("adapter replacement path is absolute: %q", relAdapterPath)
+	}
+	wantAdapter := "replace github.com/charlesonunze/fw/adapters/" + router + " => " + relAdapterPath
+	if !strings.Contains(goMod, wantAdapter) {
+		t.Fatalf("go.mod missing relative adapter replacement %q:\n%s", wantAdapter, goMod)
+	}
 }
