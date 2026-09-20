@@ -83,33 +83,45 @@ type Repository interface {
 
 var moduleServiceTmpl = `package {{ .Name }}
 
-import "context"
+import (
+	"context"
 
-// Service contains the {{ .Name }} module's business logic.
-type Service struct {
+	"github.com/charlesonunze/fw"
+)
+
+// Service is the {{ .Name }} capability exposed to other modules.
+type Service interface {
+	fw.Service
+	Create(ctx context.Context, entity *{{ .Pascal }}) error
+	GetByID(ctx context.Context, id string) (*{{ .Pascal }}, error)
+}
+
+type service struct {
 	repo Repository
 }
 
 // NewService creates a Service.
-func NewService(repo Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo Repository) *service {
+	return &service{repo: repo}
 }
 
 // Name returns the service registry key.
-func (s *Service) Name() string { return "{{ .Name }}.service" }
+func (*service) Name() string { return "{{ .Name }}.service" }
 
 // Close cleans up resources held by the service.
-func (s *Service) Close() error { return nil }
+func (*service) Close() error { return nil }
 
 // Create creates a {{ .Name }}.
-func (s *Service) Create(ctx context.Context, entity *{{ .Pascal }}) error {
+func (s *service) Create(ctx context.Context, entity *{{ .Pascal }}) error {
 	return s.repo.Create(ctx, entity)
 }
 
 // GetByID returns a {{ .Name }} by ID.
-func (s *Service) GetByID(ctx context.Context, id string) (*{{ .Pascal }}, error) {
+func (s *service) GetByID(ctx context.Context, id string) (*{{ .Pascal }}, error) {
 	return s.repo.FindByID(ctx, id)
 }
+
+var _ Service = (*service)(nil)
 `
 
 var moduleMemoryRepositoryTmpl = `package {{ .Name }}
@@ -170,11 +182,11 @@ import (
 
 // HTTPHandler handles HTTP requests for the {{ .Name }} module.
 type HTTPHandler struct {
-	service *Service
+	service Service
 }
 
 // NewHTTPHandler creates an HTTPHandler.
-func NewHTTPHandler(service *Service) *HTTPHandler {
+func NewHTTPHandler(service Service) *HTTPHandler {
 	return &HTTPHandler{service: service}
 }
 
@@ -207,7 +219,7 @@ import (
 
 // Module owns the {{ .Name }} domain and its transports.
 type Module struct {
-	service *Service
+	service Service
 	handler *HTTPHandler
 }
 
@@ -229,7 +241,7 @@ func (m *Module) Imports() []fw.ModuleName { return nil }
 func (m *Module) Register(deps *fw.Deps) error {
 	repo := NewMemoryRepository()
 	m.service = NewService(repo)
-	return deps.Services.Register(m.service)
+	return deps.Services.Register(m.service, fw.As[Service]())
 }
 
 // Init completes the module's internal wiring.

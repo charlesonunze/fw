@@ -76,7 +76,7 @@ func NewProject(name, modulePath, router, localFWPath string) (err error) {
 	}
 
 	fmt.Printf("\nProject %q created successfully!\n", name)
-	fmt.Printf("\n  cd %s\n  fw generate module <name>\n  fw dev\n\n", name)
+	fmt.Printf("\n  cd %s\n  fw generate module <name>\n  fw generate service <name>\n  fw dev\n\n", name)
 
 	return nil
 }

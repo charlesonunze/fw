@@ -65,13 +65,39 @@ func TestNewModuleCreatesFlatPrefixedPackage(t *testing.T) {
 	for _, declaration := range []string{
 		`const Name fw.ModuleName = "user"`,
 		"func (m *Module) Imports() []fw.ModuleName",
+		"service Service",
 		"func (m *Module) Register(deps *fw.Deps) error",
+		"fw.As[Service]()",
 		"func (m *Module) Init(_ context.Context, _ *fw.Deps) error",
 		"func (m *Module) RegisterRoutes(r fwhttp.Router)",
 	} {
 		if !strings.Contains(string(wiring), declaration) {
 			t.Errorf("generated module missing %q:\n%s", declaration, wiring)
 		}
+	}
+
+	service, err := os.ReadFile(filepath.Join(base, "user_service.go"))
+	if err != nil {
+		t.Fatalf("ReadFile(user_service.go) error = %v", err)
+	}
+	for _, declaration := range []string{
+		"type Service interface",
+		"fw.Service",
+		"type service struct",
+		"func NewService(repo Repository) *service",
+		"var _ Service = (*service)(nil)",
+	} {
+		if !strings.Contains(string(service), declaration) {
+			t.Errorf("generated service missing %q:\n%s", declaration, service)
+		}
+	}
+
+	handler, err := os.ReadFile(filepath.Join(base, "user_http.go"))
+	if err != nil {
+		t.Fatalf("ReadFile(user_http.go) error = %v", err)
+	}
+	if !strings.Contains(string(handler), "service Service") {
+		t.Errorf("generated HTTP handler does not depend on Service interface:\n%s", handler)
 	}
 }
 
