@@ -26,6 +26,7 @@ func TestNewServiceCreatesPrefixedApplicationService(t *testing.T) {
 		"type Service struct",
 		"func New() *Service",
 		`func (*Service) Name() string { return "mailer" }`,
+		"func (*Service) Health(context.Context) error",
 		"func (*Service) Close() error",
 		"var _ fw.Service = (*Service)(nil)",
 	} {

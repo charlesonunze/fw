@@ -371,6 +371,7 @@ func TestExtractMethodsExcludesServiceLifecycle(t *testing.T) {
 type Service struct{}
 
 func (s *Service) Name() string { return "user.service" }
+func (s *Service) Health(context.Context) error { return nil }
 func (s *Service) Close() error { return nil }
 func (s *Service) GetByID() {}
 func (s *Service) create() {}

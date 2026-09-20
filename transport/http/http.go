@@ -227,21 +227,23 @@ func livenessHandler() http.HandlerFunc {
 	}
 }
 
-type moduleHealthStatus struct {
+type componentHealthStatus struct {
 	Status string `json:"status"`
 }
 
 type readinessResponse struct {
-	Status  string                        `json:"status"`
-	Modules map[string]moduleHealthStatus `json:"modules"`
+	Status   string                           `json:"status"`
+	Modules  map[string]componentHealthStatus `json:"modules"`
+	Services map[string]componentHealthStatus `json:"services"`
 }
 
 func readinessHandler(health func(context.Context) fw.HealthReport) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		report := health(r.Context())
 		response := readinessResponse{
-			Status:  "ok",
-			Modules: make(map[string]moduleHealthStatus, len(report.Modules)),
+			Status:   "ok",
+			Modules:  make(map[string]componentHealthStatus, len(report.Modules)),
+			Services: make(map[string]componentHealthStatus, len(report.Services)),
 		}
 		if !report.Healthy {
 			response.Status = "degraded"
@@ -251,7 +253,14 @@ func readinessHandler(health func(context.Context) fw.HealthReport) http.Handler
 			if healthy {
 				status = "ok"
 			}
-			response.Modules[module] = moduleHealthStatus{Status: status}
+			response.Modules[module] = componentHealthStatus{Status: status}
+		}
+		for service, healthy := range report.Services {
+			status := "error"
+			if healthy {
+				status = "ok"
+			}
+			response.Services[service] = componentHealthStatus{Status: status}
 		}
 
 		w.Header().Set("Content-Type", "application/json")

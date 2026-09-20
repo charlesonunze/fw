@@ -94,7 +94,8 @@ type managedService struct {
 	closeErr   error
 }
 
-func (s *managedService) Name() string { return s.name }
+func (s *managedService) Name() string               { return s.name }
+func (*managedService) Health(context.Context) error { return nil }
 
 func (s *managedService) Run(ctx context.Context) error {
 	s.recorder.add("run service " + s.name)

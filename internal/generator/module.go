@@ -160,6 +160,9 @@ func NewService(repo Repository) *service {
 // Name returns the service registry key.
 func (*service) Name() string { return "{{ .Name }}.service" }
 
+// Health reports whether the service is ready.
+func (*service) Health(context.Context) error { return nil }
+
 // Close cleans up resources held by the service.
 func (*service) Close() error { return nil }
 
@@ -360,7 +363,12 @@ func (m *Module) RegisterRoutes(r fwhttp.Router) {
 	{{- end }}
 
 // Health reports whether the module is ready.
-func (m *Module) Health(_ context.Context) error { return nil }
+func (m *Module) Health(ctx context.Context) error {
+	if m.service == nil {
+		return nil
+	}
+	return m.service.Health(ctx)
+}
 
 // Close releases resources owned by the module.
 func (m *Module) Close() error {

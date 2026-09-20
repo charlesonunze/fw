@@ -9,9 +9,10 @@ import (
 
 type phaseUserService struct{}
 
-func (*phaseUserService) Name() string { return "phase.user" }
-func (*phaseUserService) Close() error { return nil }
-func (*phaseUserService) User()        {}
+func (*phaseUserService) Name() string                 { return "phase.user" }
+func (*phaseUserService) Health(context.Context) error { return nil }
+func (*phaseUserService) Close() error                 { return nil }
+func (*phaseUserService) User()                        {}
 
 type phaseUserProvider interface {
 	User()
@@ -19,9 +20,10 @@ type phaseUserProvider interface {
 
 type phaseAuthService struct{}
 
-func (*phaseAuthService) Name() string { return "phase.auth" }
-func (*phaseAuthService) Close() error { return nil }
-func (*phaseAuthService) Authorize()   {}
+func (*phaseAuthService) Name() string                 { return "phase.auth" }
+func (*phaseAuthService) Health(context.Context) error { return nil }
+func (*phaseAuthService) Close() error                 { return nil }
+func (*phaseAuthService) Authorize()                   {}
 
 type phaseAuthorizer interface {
 	Authorize()
@@ -29,13 +31,15 @@ type phaseAuthorizer interface {
 
 type phaseTodoService struct{}
 
-func (*phaseTodoService) Name() string { return "phase.todo" }
-func (*phaseTodoService) Close() error { return nil }
+func (*phaseTodoService) Name() string                 { return "phase.todo" }
+func (*phaseTodoService) Health(context.Context) error { return nil }
+func (*phaseTodoService) Close() error                 { return nil }
 
 type phaseDatabaseService struct{}
 
-func (*phaseDatabaseService) Name() string { return "phase.database" }
-func (*phaseDatabaseService) Close() error { return nil }
+func (*phaseDatabaseService) Name() string                 { return "phase.database" }
+func (*phaseDatabaseService) Health(context.Context) error { return nil }
+func (*phaseDatabaseService) Close() error                 { return nil }
 
 type phaseModule struct {
 	name       string
