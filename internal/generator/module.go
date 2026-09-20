@@ -5,25 +5,50 @@ import (
 	"path/filepath"
 )
 
+const (
+	// ModuleTransportHTTP generates a net/http-compatible module handler.
+	ModuleTransportHTTP = "http"
+	// ModuleTransportGRPC generates protobuf definitions and a gRPC handler.
+	ModuleTransportGRPC = "grpc"
+	// ModuleTransportNone generates a module without a transport handler.
+	ModuleTransportNone = "none"
+)
+
+// ModuleConfig configures generated module boundaries.
+type ModuleConfig struct {
+	Transport string
+}
+
 type moduleData struct {
 	Name       string // lowercase, e.g. "user"
 	Pascal     string // PascalCase, e.g. "User"
 	ModulePath string // go module path, e.g. "github.com/you/myapp"
+	Transport  string
 }
 
 // NewModule generates a flat, self-contained module package.
-func NewModule(name, modPath string) (err error) {
+func NewModule(name, modPath string, config ModuleConfig) (err error) {
 	if err := validateModuleName(name); err != nil {
 		return err
 	}
 	if err := validateModulePath(modPath); err != nil {
 		return err
 	}
+	transport, err := moduleTransport(config.Transport)
+	if err != nil {
+		return err
+	}
+	if transport == ModuleTransportGRPC {
+		if err := checkProtoTools(); err != nil {
+			return err
+		}
+	}
 
 	data := moduleData{
 		Name:       name,
 		Pascal:     pascal(name),
 		ModulePath: modPath,
+		Transport:  transport,
 	}
 
 	base := filepath.Join("internal", "modules", name)
@@ -35,16 +60,22 @@ func NewModule(name, modPath string) (err error) {
 	}
 	defer cleanupGeneratedDir(base, &err)
 
-	files := []struct {
+	type moduleFile struct {
 		path string
 		tmpl string
-	}{
+	}
+	files := []moduleFile{
 		{filepath.Join(base, name+"_module.go"), moduleWiringTmpl},
 		{filepath.Join(base, name+"_model.go"), moduleModelTmpl},
 		{filepath.Join(base, name+"_service.go"), moduleServiceTmpl},
 		{filepath.Join(base, name+"_repository.go"), moduleRepositoryTmpl},
 		{filepath.Join(base, name+"_repository_memory.go"), moduleMemoryRepositoryTmpl},
-		{filepath.Join(base, name+"_http.go"), moduleHTTPTmpl},
+	}
+	switch transport {
+	case ModuleTransportHTTP:
+		files = append(files, moduleFile{filepath.Join(base, name+"_http.go"), moduleHTTPTmpl})
+	case ModuleTransportGRPC:
+		files = append(files, moduleFile{filepath.Join(base, name+"_grpc.go"), moduleGRPCTmpl})
 	}
 
 	for _, file := range files {
@@ -53,13 +84,34 @@ func NewModule(name, modPath string) (err error) {
 			return err
 		}
 	}
+	if transport == ModuleTransportGRPC {
+		if err = NewProto(name, modPath); err != nil {
+			return err
+		}
+	}
 
 	fmt.Printf("\nModule %q created at %s\n", name, base)
 	fmt.Printf("Don't forget to register it in cmd/main.go:\n\n")
 	fmt.Printf("  import \"%s/internal/modules/%s\"\n\n", modPath, name)
 	fmt.Printf("  app.RegisterModules(\n    %s.New(),\n  )\n\n", name)
+	if transport == ModuleTransportGRPC {
+		fmt.Printf("Ensure cmd/main.go configures a github.com/charlesonunze/fw/transport/grpc transport.\n")
+		fmt.Printf("Run 'go mod tidy' to add the generated gRPC dependencies.\n\n")
+	}
 
 	return nil
+}
+
+func moduleTransport(transport string) (string, error) {
+	if transport == "" {
+		return ModuleTransportHTTP, nil
+	}
+	switch transport {
+	case ModuleTransportHTTP, ModuleTransportGRPC, ModuleTransportNone:
+		return transport, nil
+	default:
+		return "", fmt.Errorf("unsupported module transport %q: use http, grpc, or none", transport)
+	}
 }
 
 var moduleModelTmpl = `package {{ .Name }}
@@ -208,19 +260,65 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 }
 `
 
+var moduleGRPCTmpl = `package {{ .Name }}
+
+import (
+	"context"
+
+	{{ .Name }}pb "{{ .ModulePath }}/internal/modules/{{ .Name }}/pb"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// GRPCHandler exposes the {{ .Name }} service over gRPC.
+type GRPCHandler struct {
+	{{ .Name }}pb.Unimplemented{{ .Pascal }}ServiceServer
+	service Service
+}
+
+// NewGRPCHandler creates a GRPCHandler.
+func NewGRPCHandler(service Service) *GRPCHandler {
+	return &GRPCHandler{service: service}
+}
+
+// Get{{ .Pascal }} handles the generated Get{{ .Pascal }} RPC.
+func (h *GRPCHandler) Get{{ .Pascal }}(
+	ctx context.Context,
+	request *{{ .Name }}pb.Get{{ .Pascal }}Request,
+) (*{{ .Name }}pb.Get{{ .Pascal }}Response, error) {
+	entity, err := h.service.GetByID(ctx, request.GetId())
+	if err != nil {
+		return nil, status.Error(codes.NotFound, "{{ .Name }} not found")
+	}
+	return &{{ .Name }}pb.Get{{ .Pascal }}Response{Id: entity.ID}, nil
+}
+
+// RegisterGRPC exposes the module's gRPC service.
+func (m *Module) RegisterGRPC(server *grpc.Server) {
+	{{ .Name }}pb.Register{{ .Pascal }}ServiceServer(server, m.handler)
+}
+`
+
 var moduleWiringTmpl = `package {{ .Name }}
 
 import (
 	"context"
 
 	"github.com/charlesonunze/fw"
+	{{- if eq .Transport "http" }}
 	fwhttp "github.com/charlesonunze/fw/transport/http"
+	{{- end }}
 )
 
 // Module owns the {{ .Name }} domain and its transports.
 type Module struct {
 	service Service
+	{{- if eq .Transport "http" }}
 	handler *HTTPHandler
+	{{- else if eq .Transport "grpc" }}
+	handler *GRPCHandler
+	{{- end }}
 }
 
 // Name identifies the {{ .Name }} module.
@@ -246,14 +344,20 @@ func (m *Module) Register(deps *fw.Deps) error {
 
 // Init completes the module's internal wiring.
 func (m *Module) Init(_ context.Context, _ *fw.Deps) error {
+	{{- if eq .Transport "http" }}
 	m.handler = NewHTTPHandler(m.service)
+	{{- else if eq .Transport "grpc" }}
+	m.handler = NewGRPCHandler(m.service)
+	{{- end }}
 	return nil
 }
 
+	{{- if eq .Transport "http" }}
 // RegisterRoutes exposes the module's HTTP routes.
 func (m *Module) RegisterRoutes(r fwhttp.Router) {
 	r.Group("/{{ .Name }}s").Get("/{id}", m.handler.GetByID)
 }
+	{{- end }}
 
 // Health reports whether the module is ready.
 func (m *Module) Health(_ context.Context) error { return nil }

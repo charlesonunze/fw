@@ -82,7 +82,7 @@ func TestNewProtoGeneratesPrefixedFiles(t *testing.T) {
 	}
 	t.Chdir(t.TempDir())
 
-	if err := NewModule("user", "example.com/app"); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 	if err := NewProto("user", "example.com/app"); err != nil {

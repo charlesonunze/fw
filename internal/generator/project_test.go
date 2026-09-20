@@ -95,11 +95,48 @@ func TestNewProjectCompiles(t *testing.T) {
 			if err := NewService("mailer", "example.com/"+project); err != nil {
 				t.Fatalf("NewService() error = %v", err)
 			}
-			if err := NewModule("user", "example.com/"+project); err != nil {
+			if err := NewModule("user", "example.com/"+project, ModuleConfig{}); err != nil {
 				t.Fatalf("NewModule() error = %v", err)
 			}
 			if err := runGo(".", "test", "./..."); err != nil {
 				t.Fatalf("generated %s project does not compile: %v", router, err)
+			}
+		})
+	}
+}
+
+func TestGeneratedAlternativeModuleTransportsCompile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping generated project compilation in short mode")
+	}
+	t.Setenv("GOWORK", "off")
+	root := frameworkRoot(t)
+
+	for _, transport := range []string{ModuleTransportNone, ModuleTransportGRPC} {
+		t.Run(transport, func(t *testing.T) {
+			if transport == ModuleTransportGRPC {
+				if err := checkProtoTools(); err != nil {
+					t.Skip(err)
+				}
+			}
+
+			workspace := t.TempDir()
+			t.Chdir(workspace)
+			project := transport + "-app"
+			modulePath := "example.com/" + project
+			if err := NewProject(project, modulePath, routerChi, root); err != nil {
+				t.Fatalf("NewProject() error = %v", err)
+			}
+
+			t.Chdir(filepath.Join(workspace, project))
+			if err := NewModule("user", modulePath, ModuleConfig{Transport: transport}); err != nil {
+				t.Fatalf("NewModule() error = %v", err)
+			}
+			if err := runGo(".", "mod", "tidy"); err != nil {
+				t.Fatalf("tidy generated %s module dependencies: %v", transport, err)
+			}
+			if err := runGo(".", "test", "./..."); err != nil {
+				t.Fatalf("generated %s module does not compile: %v", transport, err)
 			}
 		})
 	}

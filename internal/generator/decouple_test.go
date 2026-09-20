@@ -163,7 +163,7 @@ func TestDecoupleModuleRejectsInvalidPortBeforeCreatingOutput(t *testing.T) {
 func TestDecoupleModuleRejectsTransportNotImplementedByModule(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
-	if err := NewModule("user", "example.com/app"); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 
@@ -262,7 +262,7 @@ const documentation = "example.com/app/internal/modules/order/pb"
 func TestDecoupleModuleRejectsOutputInsideSource(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
-	if err := NewModule("user", "example.com/app"); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 
@@ -280,7 +280,7 @@ func TestDecoupleModuleRollsBackFailedGeneration(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("PATH", t.TempDir())
 	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
-	if err := NewModule("user", "example.com/app"); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 
@@ -394,7 +394,7 @@ func TestDecoupledFlatModuleCompiles(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
-	if err := NewModule("user", "example.com/app"); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 
@@ -427,7 +427,7 @@ func TestDecoupledGRPCModuleNeedsNoRouterAdapter(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
-	if err := NewModule("user", "example.com/app"); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 	writeFixture(t, filepath.Join("internal", "modules", "user", "user_grpc.go"), `package user
