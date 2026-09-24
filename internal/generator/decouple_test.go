@@ -411,6 +411,7 @@ func TestDecoupledFlatModuleCompiles(t *testing.T) {
 	); err != nil {
 		t.Fatalf("DecoupleModule() error = %v", err)
 	}
+	assertPortableLocalReplacements(t, output, routerChi, frameworkRoot(t))
 	assertDevelopmentFiles(t, output)
 	if err := runGo(output, "mod", "tidy"); err != nil {
 		t.Fatalf("tidy decoupled module: %v", err)
@@ -450,6 +451,7 @@ func (m *Module) RegisterGRPC(*grpc.Server) {}
 	); err != nil {
 		t.Fatalf("DecoupleModule() error = %v", err)
 	}
+	assertPortableLocalReplacements(t, output, "", frameworkRoot(t))
 	if err := runGo(output, "mod", "tidy"); err != nil {
 		t.Fatalf("tidy decoupled gRPC module: %v", err)
 	}
