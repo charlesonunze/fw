@@ -39,7 +39,7 @@ func NewService(name, modPath string) (err error) {
 	fmt.Printf("Register it in cmd/main.go:\n\n")
 	fmt.Printf("  import \"%s/internal/services/%s\"\n\n", modPath, name)
 	fmt.Printf("  %sService := %s.New()\n", name, name)
-	fmt.Printf("  if err := app.RegisterService(%sService); err != nil {\n", name)
+	fmt.Printf("  if err := app.RegisterService(%sService, fw.As[%s.Service]()); err != nil {\n", name, name)
 	fmt.Printf("    log.Fatal(err)\n  }\n\n")
 
 	return nil
@@ -53,22 +53,26 @@ import (
 	"github.com/charlesonunze/fw"
 )
 
-// Service is the application-wide {{ .Name }} service.
-type Service struct{}
+// Service is the application-wide {{ .Name }} service contract.
+type Service interface {
+	fw.Service
+}
+
+type service struct{}
 
 // New creates a {{ .Name }} service.
-func New() *Service {
-	return &Service{}
+func New() Service {
+	return &service{}
 }
 
 // Name returns the service registry key.
-func (*Service) Name() string { return "{{ .Name }}" }
+func (*service) Name() string { return "{{ .Name }}" }
 
 // Health reports whether the service is ready.
-func (*Service) Health(context.Context) error { return nil }
+func (*service) Health(context.Context) error { return nil }
 
 // Close releases resources owned by the service.
-func (*Service) Close() error { return nil }
+func (*service) Close() error { return nil }
 
-var _ fw.Service = (*Service)(nil)
+var _ Service = (*service)(nil)
 `
