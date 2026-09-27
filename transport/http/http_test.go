@@ -123,6 +123,29 @@ func TestPrepareUsesDefaultsAndRegistersHTTPModules(t *testing.T) {
 	}
 }
 
+func TestAddrReportsBoundAddress(t *testing.T) {
+	transport := New(newTestRouter(), Config{Addr: "127.0.0.1:0"})
+	if address := transport.Addr(); address != nil {
+		t.Fatalf("Addr() before Prepare = %v, want nil", address)
+	}
+	if err := transport.Prepare(context.Background(), testDeps()); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	t.Cleanup(func() { _ = transport.Stop(context.Background()) })
+
+	address := transport.Addr()
+	if address == nil || address.Network() != "tcp" {
+		t.Fatalf("Addr() = %v, want bound TCP address", address)
+	}
+	_, port, err := net.SplitHostPort(address.String())
+	if err != nil {
+		t.Fatalf("SplitHostPort(Addr()) error = %v", err)
+	}
+	if port == "0" {
+		t.Fatal("Addr() returned unresolved port 0")
+	}
+}
+
 func TestNewCopiesMiddleware(t *testing.T) {
 	first := func(next http.Handler) http.Handler { return next }
 	second := func(next http.Handler) http.Handler { return next }
@@ -342,7 +365,7 @@ func TestStopForcesActiveRequestsClosedAfterDeadline(t *testing.T) {
 	clientDone := make(chan error, 1)
 	client := &http.Client{Timeout: time.Second}
 	go func() {
-		response, requestErr := client.Get("http://" + transport.listener.Addr().String() + "/block")
+		response, requestErr := client.Get("http://" + transport.Addr().String() + "/block")
 		if response != nil {
 			_ = response.Body.Close()
 		}

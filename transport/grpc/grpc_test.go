@@ -70,6 +70,29 @@ func TestPrepareUsesDefaultsAndRegistersGRPCModules(t *testing.T) {
 	}
 }
 
+func TestAddrReportsBoundAddress(t *testing.T) {
+	transport := New(Config{Addr: "127.0.0.1:0"})
+	if address := transport.Addr(); address != nil {
+		t.Fatalf("Addr() before Prepare = %v, want nil", address)
+	}
+	if err := transport.Prepare(context.Background(), testDeps()); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	t.Cleanup(func() { _ = transport.Stop(context.Background()) })
+
+	address := transport.Addr()
+	if address == nil || address.Network() != "tcp" {
+		t.Fatalf("Addr() = %v, want bound TCP address", address)
+	}
+	_, port, err := net.SplitHostPort(address.String())
+	if err != nil {
+		t.Fatalf("SplitHostPort(Addr()) error = %v", err)
+	}
+	if port == "0" {
+		t.Fatal("Addr() returned unresolved port 0")
+	}
+}
+
 func TestPreparePreservesConfiguredServerAndHealthService(t *testing.T) {
 	server := grpc.NewServer()
 	customHealth := health.NewServer()
@@ -131,7 +154,7 @@ func TestHealthServiceReportsOverallApplicationHealth(t *testing.T) {
 	go func() { runDone <- transport.Run(context.Background()) }()
 
 	conn, err := grpc.NewClient(
-		"passthrough:///"+transport.listener.Addr().String(),
+		"passthrough:///"+transport.Addr().String(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
@@ -199,7 +222,7 @@ func TestStopForcesActiveRPCClosedAfterDeadline(t *testing.T) {
 	go func() { runDone <- transport.Run(context.Background()) }()
 
 	conn, err := grpc.NewClient(
-		"passthrough:///"+transport.listener.Addr().String(),
+		"passthrough:///"+transport.Addr().String(),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {

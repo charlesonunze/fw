@@ -38,6 +38,7 @@ type Transport struct {
 	mu       sync.Mutex
 	logger   fw.Logger
 	listener net.Listener
+	address  addressSnapshot
 	server   *grpc.Server
 	prepared bool
 	running  bool
@@ -45,6 +46,14 @@ type Transport struct {
 	stopOnce sync.Once
 	stopErr  error
 }
+
+type addressSnapshot struct {
+	network string
+	value   string
+}
+
+func (a addressSnapshot) Network() string { return a.network }
+func (a addressSnapshot) String() string  { return a.value }
 
 // New creates a gRPC transport from config. Network resources are acquired by
 // Prepare when the application starts.
@@ -58,6 +67,17 @@ func (t *Transport) Name() string {
 		return t.config.Name
 	}
 	return defaultName
+}
+
+// Addr returns an immutable snapshot of the bound network address after a
+// successful Prepare. It returns nil before the transport is prepared.
+func (t *Transport) Addr() net.Addr {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.address.value == "" {
+		return nil
+	}
+	return t.address
 }
 
 // Prepare registers module services and application health, then binds the
@@ -108,6 +128,8 @@ func (t *Transport) Prepare(ctx context.Context, deps fw.TransportDeps) error {
 	t.config.Addr = addr
 	t.logger = deps.Logger
 	t.listener = listener
+	listenerAddress := listener.Addr()
+	t.address = addressSnapshot{network: listenerAddress.Network(), value: listenerAddress.String()}
 	t.server = server
 	t.prepared = true
 	listenerOwned = false
