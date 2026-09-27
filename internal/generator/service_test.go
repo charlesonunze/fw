@@ -3,6 +3,7 @@ package generator
 import (
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,8 +13,15 @@ import (
 func TestNewServiceCreatesPrefixedApplicationService(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	if err := NewService("mailer", "example.com/app"); err != nil {
-		t.Fatalf("NewService() error = %v", err)
+	var generateErr error
+	output := captureStdout(t, func() {
+		generateErr = NewService("mailer", "example.com/app")
+	})
+	if generateErr != nil {
+		t.Fatalf("NewService() error = %v", generateErr)
+	}
+	if want := "app.RegisterService(mailerService, fw.As[mailer.Service]())"; !strings.Contains(output, want) {
+		t.Fatalf("NewService() output missing %q:\n%s", want, output)
 	}
 
 	path := filepath.Join("internal", "services", "mailer", "mailer_service.go")
@@ -23,12 +31,14 @@ func TestNewServiceCreatesPrefixedApplicationService(t *testing.T) {
 	}
 	for _, declaration := range []string{
 		"package mailer",
-		"type Service struct",
-		"func New() *Service",
-		`func (*Service) Name() string { return "mailer" }`,
-		"func (*Service) Health(context.Context) error",
-		"func (*Service) Close() error",
-		"var _ fw.Service = (*Service)(nil)",
+		"type Service interface",
+		"fw.Service",
+		"type service struct",
+		"func New() Service",
+		`func (*service) Name() string { return "mailer" }`,
+		"func (*service) Health(context.Context) error",
+		"func (*service) Close() error",
+		"var _ Service = (*service)(nil)",
 	} {
 		if !strings.Contains(string(content), declaration) {
 			t.Errorf("generated service missing %q:\n%s", declaration, content)
@@ -47,11 +57,34 @@ func TestNewServiceCreatesPrefixedApplicationService(t *testing.T) {
 	}
 }
 
+func captureStdout(t *testing.T, run func()) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	original := os.Stdout
+	os.Stdout = writer
+	run()
+	os.Stdout = original
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close(stdout writer) error = %v", err)
+	}
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll(stdout) error = %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("Close(stdout reader) error = %v", err)
+	}
+	return string(content)
+}
+
 func TestNewServiceRejectsExistingService(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	if err := NewService("mailer", "example.com/app"); err != nil {
-		t.Fatalf("first NewService() error = %v", err)
+		t.Fatalf("NewService() error = %v", err)
 	}
 	if err := NewService("mailer", "example.com/app"); err == nil {
 		t.Fatal("second NewService() error = nil, want existing service error")
