@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,16 +13,17 @@ import (
 // App is the application container that manages modules, services, optional
 // transports, and their shared lifecycle.
 type App struct {
-	modules            []Module
-	registeredModules  []Module
-	initializedModules []Module
-	preRegistered      []Service
-	transports         []Transport
-	health             *healthEvaluator
-	logger             Logger
-	services           *ServiceRegistry
-	moduleScopes       map[ModuleName]*ServiceRegistry
-	shutdownTimeout    time.Duration
+	modules             []Module
+	registeredModules   []Module
+	initializedModules  []Module
+	preRegistered       []Service
+	serviceDependencies map[string][]reflect.Type
+	transports          []Transport
+	health              *healthEvaluator
+	logger              Logger
+	services            *ServiceRegistry
+	moduleScopes        map[ModuleName]*ServiceRegistry
+	shutdownTimeout     time.Duration
 
 	lifecycleMu   sync.Mutex
 	state         appState
@@ -71,15 +73,26 @@ func New(config Config) *App {
 // RegisterService registers an application-wide service such as a database,
 // broker, or cache before module registration. Registered services contribute
 // to readiness and are shut down gracefully on exit. Use As to expose
-// additional interface contracts. Call RegisterService before Start.
+// additional interface contracts and DependsOn to declare lifecycle
+// dependencies. Call RegisterService before Start.
 func (a *App) RegisterService(svc Service, options ...RegistrationOption) error {
 	if a.services == nil {
 		a.services = NewServiceRegistry()
 	}
-	if err := a.services.Register(svc, options...); err != nil {
+	registration, err := a.services.registerApplication(svc, options...)
+	if err != nil {
 		return fmt.Errorf("fw: register application service: %w", err)
 	}
 	a.preRegistered = append(a.preRegistered, svc)
+	if len(registration.dependencies) > 0 {
+		if a.serviceDependencies == nil {
+			a.serviceDependencies = make(map[string][]reflect.Type)
+		}
+		a.serviceDependencies[svc.Name()] = append(
+			[]reflect.Type(nil),
+			registration.dependencies...,
+		)
+	}
 	return nil
 }
 
@@ -103,6 +116,15 @@ func (a *App) setup() error {
 	if a.shutdownTimeout < 0 {
 		return fmt.Errorf("fw: shutdown timeout cannot be negative")
 	}
+	orderedServices, err := orderApplicationServices(
+		a.preRegistered,
+		a.serviceDependencies,
+		a.services,
+	)
+	if err != nil {
+		return err
+	}
+	a.preRegistered = orderedServices
 	a.registeredModules = nil
 	a.initializedModules = nil
 	ordered, imports, err := orderModules(a.modules)
