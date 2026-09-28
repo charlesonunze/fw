@@ -18,10 +18,12 @@ type healthComponent struct {
 }
 
 // HealthReport is the sanitized application health state exposed to transports.
-// Module and application-service errors are omitted and logged only when their
-// health state changes.
+// Healthy reports whether the application is ready to accept traffic. Degraded
+// reports that an optional readiness service is unhealthy. Module and service
+// errors are omitted and logged only when their health state changes.
 type HealthReport struct {
 	Healthy  bool
+	Degraded bool
 	Modules  map[string]bool
 	Services map[string]bool
 }
@@ -60,7 +62,11 @@ func (a *App) evaluateHealth(ctx context.Context) HealthReport {
 		healthy := err == nil
 		report.Services[name] = healthy
 		if !healthy {
-			report.Healthy = false
+			if _, optional := a.optionalReadiness[name]; optional {
+				report.Degraded = true
+			} else {
+				report.Healthy = false
+			}
 		}
 		a.health.record(a.logger, "service", name, err)
 	}

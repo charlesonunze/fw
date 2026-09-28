@@ -21,10 +21,16 @@ func (m *healthTestModule) Health(context.Context) error    { return m.healthErr
 func (*healthTestModule) Close() error                      { return nil }
 
 type healthTestService struct {
+	name      string
 	healthErr error
 }
 
-func (*healthTestService) Name() string                   { return "postgres" }
+func (s *healthTestService) Name() string {
+	if s.name == "" {
+		return "postgres"
+	}
+	return s.name
+}
 func (s *healthTestService) Health(context.Context) error { return s.healthErr }
 func (*healthTestService) Close() error                   { return nil }
 
@@ -158,6 +164,33 @@ func TestHealthTransitionTrackingIsConcurrent(t *testing.T) {
 		t.Fatalf("concurrent transition logs = %d, want 1", len(entries))
 	}
 	assertHealthLog(t, entries, 0, "warn", "module became unhealthy", module.healthErr.Error())
+}
+
+func TestOptionalReadinessDegradesWithoutBlockingReadiness(t *testing.T) {
+	logger := &healthTestLogger{}
+	service := &healthTestService{
+		name:      "cache",
+		healthErr: errors.New("redis unavailable: password=secret"),
+	}
+	app := New(Config{Logger: logger})
+	if err := app.RegisterService(service, OptionalReadiness()); err != nil {
+		t.Fatalf("RegisterService() error = %v", err)
+	}
+
+	report := app.evaluateHealth(context.Background())
+	if !report.Healthy || !report.Degraded || report.Services[service.Name()] {
+		t.Fatalf("optional service health report = %+v, want ready and degraded", report)
+	}
+	entries := logger.snapshot()
+	assertHealthLog(t, entries, 0, "warn", "service became unhealthy", service.healthErr.Error())
+
+	service.healthErr = nil
+	report = app.evaluateHealth(context.Background())
+	if !report.Healthy || report.Degraded || !report.Services[service.Name()] {
+		t.Fatalf("recovered optional service health report = %+v, want healthy", report)
+	}
+	entries = logger.snapshot()
+	assertHealthLog(t, entries, 1, "info", "service recovered", "")
 }
 
 func assertHealthLog(t *testing.T, entries []healthLogEntry, index int, level, msg, healthErr string) {
