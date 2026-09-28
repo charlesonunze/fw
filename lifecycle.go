@@ -55,11 +55,11 @@ func (a *App) Start(ctx context.Context) error {
 	a.installRuntimeCancel(cancelRuntime)
 	defer cancelRuntime(nil)
 
-	if trigger, ok := a.pendingShutdown(ctx); ok {
-		return a.shutdownStartup(trigger, nil, nil)
-	}
 	if err := a.setup(); err != nil {
 		return a.shutdownStartup(shutdownTrigger{cause: err}, err, nil)
+	}
+	if trigger, ok := a.pendingShutdown(ctx); ok {
+		return a.shutdownStartup(trigger, nil, nil)
 	}
 
 	if err := a.registerModules(); err != nil {
