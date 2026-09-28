@@ -20,8 +20,10 @@ func (option registrationOption) apply(registration *serviceRegistration) error 
 }
 
 type serviceRegistration struct {
-	aliases      []reflect.Type
-	dependencies []reflect.Type
+	aliases             []reflect.Type
+	dependencies        []reflect.Type
+	optionalReadiness   bool
+	readinessConfigured bool
 }
 
 type serviceProvider struct {
@@ -72,6 +74,25 @@ func DependsOn[T any]() RegistrationOption {
 			}
 		}
 		registration.dependencies = append(registration.dependencies, target)
+		return nil
+	})
+}
+
+// OptionalReadiness marks an application service as non-critical to readiness.
+// The service is still health checked, included in health reports, and logged
+// when its health changes. An unhealthy optional service degrades application
+// health without making the application unready.
+//
+// OptionalReadiness only affects health aggregation. Registration, startup,
+// Runner failures, shutdown, and dependency resolution remain required.
+// OptionalReadiness is only valid with App.RegisterService.
+func OptionalReadiness() RegistrationOption {
+	return registrationOption(func(registration *serviceRegistration) error {
+		if registration.readinessConfigured {
+			return errors.New("fw: readiness behavior configured more than once")
+		}
+		registration.optionalReadiness = true
+		registration.readinessConfigured = true
 		return nil
 	})
 }
@@ -139,6 +160,9 @@ func (r *ServiceRegistry) Register(svc Service, options ...RegistrationOption) e
 	}
 	if len(registration.dependencies) > 0 {
 		return errors.New("fw: DependsOn is only valid with App.RegisterService; use Module.Imports for module dependencies")
+	}
+	if registration.optionalReadiness {
+		return errors.New("fw: OptionalReadiness is only valid with App.RegisterService")
 	}
 	return r.register(svc, registration)
 }

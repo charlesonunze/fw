@@ -267,7 +267,7 @@ func readinessHandler(health func(context.Context) fw.HealthReport) http.Handler
 			Modules:  make(map[string]componentHealthStatus, len(report.Modules)),
 			Services: make(map[string]componentHealthStatus, len(report.Services)),
 		}
-		if !report.Healthy {
+		if !report.Healthy || report.Degraded {
 			response.Status = "degraded"
 		}
 		for module, healthy := range report.Modules {

@@ -18,6 +18,7 @@ type App struct {
 	initializedModules  []Module
 	preRegistered       []Service
 	serviceDependencies map[string][]reflect.Type
+	optionalReadiness   map[string]struct{}
 	transports          []Transport
 	health              *healthEvaluator
 	logger              Logger
@@ -72,9 +73,10 @@ func New(config Config) *App {
 
 // RegisterService registers an application-wide service such as a database,
 // broker, or cache before module registration. Registered services contribute
-// to readiness and are shut down gracefully on exit. Use As to expose
-// additional interface contracts and DependsOn to declare lifecycle
-// dependencies. Call RegisterService before Start.
+// to readiness by default and are shut down gracefully on exit. Use As to
+// expose additional interface contracts, DependsOn to declare lifecycle
+// dependencies, and OptionalReadiness for a non-critical dependency whose
+// health must remain visible. Call RegisterService before Start.
 func (a *App) RegisterService(svc Service, options ...RegistrationOption) error {
 	if a.services == nil {
 		a.services = NewServiceRegistry()
@@ -92,6 +94,12 @@ func (a *App) RegisterService(svc Service, options ...RegistrationOption) error 
 			[]reflect.Type(nil),
 			registration.dependencies...,
 		)
+	}
+	if registration.optionalReadiness {
+		if a.optionalReadiness == nil {
+			a.optionalReadiness = make(map[string]struct{})
+		}
+		a.optionalReadiness[svc.Name()] = struct{}{}
 	}
 	return nil
 }

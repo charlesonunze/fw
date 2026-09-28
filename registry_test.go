@@ -193,3 +193,39 @@ func TestAppRegisterServiceReturnsErrorsImmediately(t *testing.T) {
 		t.Fatalf("closed services = %d, want only the accepted service", closed)
 	}
 }
+
+func TestOptionalReadinessOptionValidation(t *testing.T) {
+	t.Run("rejects registry usage", func(t *testing.T) {
+		registry := NewServiceRegistry()
+		err := registry.Register(&registryService{name: "cache"}, OptionalReadiness())
+		if err == nil || !strings.Contains(err.Error(), "only valid with App.RegisterService") {
+			t.Fatalf("Register() error = %v, want application service error", err)
+		}
+	})
+
+	t.Run("rejects duplicate configuration", func(t *testing.T) {
+		app := New(Config{Logger: discardLogger{}})
+		err := app.RegisterService(
+			&registryService{name: "cache"},
+			OptionalReadiness(),
+			OptionalReadiness(),
+		)
+		if err == nil || !strings.Contains(err.Error(), "configured more than once") {
+			t.Fatalf("RegisterService() error = %v, want duplicate readiness error", err)
+		}
+		if len(app.preRegistered) != 0 {
+			t.Fatalf("owned application services = %d, want 0", len(app.preRegistered))
+		}
+	})
+
+	t.Run("records application service metadata", func(t *testing.T) {
+		app := New(Config{Logger: discardLogger{}})
+		service := &registryService{name: "cache"}
+		if err := app.RegisterService(service, OptionalReadiness()); err != nil {
+			t.Fatalf("RegisterService() error = %v", err)
+		}
+		if _, optional := app.optionalReadiness[service.Name()]; !optional {
+			t.Fatal("optional readiness metadata was not recorded")
+		}
+	})
+}

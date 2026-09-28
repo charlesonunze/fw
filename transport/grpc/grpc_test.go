@@ -140,10 +140,15 @@ func TestPrepareBindFailureDoesNotMutateServer(t *testing.T) {
 
 func TestHealthServiceReportsOverallApplicationHealth(t *testing.T) {
 	var healthy atomic.Bool
+	var degraded atomic.Bool
 	healthy.Store(true)
 	deps := testDeps()
 	deps.Health = func(context.Context) fw.HealthReport {
-		return fw.HealthReport{Healthy: healthy.Load(), Modules: map[string]bool{"user": healthy.Load()}}
+		return fw.HealthReport{
+			Healthy:  healthy.Load(),
+			Degraded: degraded.Load(),
+			Modules:  map[string]bool{"user": healthy.Load()},
+		}
 	}
 
 	transport := New(Config{Addr: "127.0.0.1:0"})
@@ -178,6 +183,15 @@ func TestHealthServiceReportsOverallApplicationHealth(t *testing.T) {
 	}
 	if len(list.GetStatuses()) != 1 || list.GetStatuses()[""].GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING {
 		t.Fatalf("List() statuses = %+v, want only overall SERVING status", list.GetStatuses())
+	}
+
+	degraded.Store(true)
+	response, err = client.Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+	if err != nil {
+		t.Fatalf("optional degradation Check() error = %v", err)
+	}
+	if response.GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING {
+		t.Fatalf("optional degradation Check() status = %s, want SERVING", response.GetStatus())
 	}
 
 	healthy.Store(false)

@@ -315,6 +315,38 @@ func TestHealthEndpointsExposeOnlySanitizedStatus(t *testing.T) {
 	}
 }
 
+func TestReadinessEndpointReportsOptionalFailureAsDegraded(t *testing.T) {
+	handler := readinessHandler(func(context.Context) fw.HealthReport {
+		return fw.HealthReport{
+			Healthy:  true,
+			Degraded: true,
+			Modules:  map[string]bool{"todo": true},
+			Services: map[string]bool{"cache": false},
+		}
+	})
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "/health/ready", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext() error = %v", err)
+	}
+	recorder := newResponseRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.status != http.StatusOK {
+		t.Fatalf("readiness status = %d, want %d", recorder.status, http.StatusOK)
+	}
+	var response readinessResponse
+	if err := json.Unmarshal(recorder.body, &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if response.Status != "degraded" {
+		t.Fatalf("readiness response status = %q, want degraded", response.Status)
+	}
+	if status := response.Services["cache"].Status; status != "error" {
+		t.Fatalf("cache status = %q, want error", status)
+	}
+}
+
 func TestPrepareRejectsInvalidMiddlewareBeforeRegisteringRoutes(t *testing.T) {
 	tests := []struct {
 		name       string
