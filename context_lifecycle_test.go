@@ -94,6 +94,53 @@ type managedService struct {
 	closeErr   error
 }
 
+type managedFinalizer struct {
+	managedService
+	finalizeStarted chan struct{}
+	releaseFinalize chan struct{}
+	finalizeErr     error
+}
+
+func (s *managedFinalizer) Finalize(ctx context.Context) error {
+	s.recorder.add("finalize service " + s.name)
+	if s.finalizeStarted != nil {
+		close(s.finalizeStarted)
+	}
+	if s.releaseFinalize != nil {
+		select {
+		case <-s.releaseFinalize:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.finalizeErr
+}
+
+type lifecycleLogger struct {
+	recorder *eventRecorder
+}
+
+func (l *lifecycleLogger) Info(msg string, args ...any) {
+	switch msg {
+	case "shutdown complete":
+		l.recorder.add("log shutdown complete")
+	case "application state changed":
+		for i := 0; i+1 < len(args); i += 2 {
+			key, keyOK := args[i].(string)
+			value, valueOK := args[i+1].(string)
+			if keyOK && valueOK && key == "to" && value == appStateClosed.String() {
+				l.recorder.add("log state closed")
+				return
+			}
+		}
+	}
+}
+
+func (*lifecycleLogger) Error(string, ...any) {}
+func (*lifecycleLogger) Debug(string, ...any) {}
+func (*lifecycleLogger) Warn(string, ...any)  {}
+func (l *lifecycleLogger) With(...any) Logger { return l }
+
 func (s *managedService) Name() string               { return s.name }
 func (*managedService) Health(context.Context) error { return nil }
 
@@ -391,6 +438,92 @@ func TestLifecycleAggregatesStopAndCloseErrors(t *testing.T) {
 
 	err := app.Start(context.Background())
 	for _, want := range []error{runErr, moduleStopErr, moduleCloseErr, serviceStopErr, serviceCloseErr} {
+		if !errors.Is(err, want) {
+			t.Errorf("Start() error = %v, missing %v", err, want)
+		}
+	}
+}
+
+func TestFinalizerRunsAfterLifecycleLogsAndBlocksStop(t *testing.T) {
+	recorder := &eventRecorder{}
+	finalizeStarted := make(chan struct{})
+	releaseFinalize := make(chan struct{})
+	service := &managedService{name: "postgres", recorder: recorder}
+	finalizer := &managedFinalizer{
+		managedService:  managedService{name: "observability", recorder: recorder},
+		finalizeStarted: finalizeStarted,
+		releaseFinalize: releaseFinalize,
+	}
+	app := New(Config{Logger: &lifecycleLogger{recorder: recorder}})
+	if err := app.RegisterService(finalizer); err != nil {
+		t.Fatalf("RegisterService(finalizer) error = %v", err)
+	}
+	if err := app.RegisterService(service); err != nil {
+		t.Fatalf("RegisterService(service) error = %v", err)
+	}
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- app.Start(context.Background()) }()
+	waitForAppState(t, app, appStateRunning)
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- app.Stop(context.Background()) }()
+	waitForSignal(t, finalizeStarted, "application service finalizer")
+	waitForAppState(t, app, appStateClosed)
+	select {
+	case err := <-stopDone:
+		t.Fatalf("Stop() returned before finalization completed: %v", err)
+	default:
+	}
+	secondStopDone := make(chan error, 1)
+	go func() { secondStopDone <- app.Stop(context.Background()) }()
+	select {
+	case err := <-secondStopDone:
+		t.Fatalf("Stop() in closed state returned before finalization completed: %v", err)
+	default:
+	}
+	close(releaseFinalize)
+
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if err := <-secondStopDone; err != nil {
+		t.Fatalf("second Stop() error = %v", err)
+	}
+	if err := <-startDone; err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	events := recorder.snapshot()
+	assertBefore(t, events, "close service postgres", "log shutdown complete")
+	assertBefore(t, events, "log shutdown complete", "log state closed")
+	assertBefore(t, events, "log state closed", "finalize service observability")
+	assertBefore(t, events, "finalize service observability", "close service observability")
+	if eventIndex(events, "stop service observability") >= 0 {
+		t.Fatalf("events %v unexpectedly stop finalizer before finalization", events)
+	}
+}
+
+func TestFinalizerErrorsAreAggregated(t *testing.T) {
+	finalizeErr := errors.New("flush failed")
+	closeErr := errors.New("exporter close failed")
+	service := &managedFinalizer{
+		managedService: managedService{
+			name:     "observability",
+			recorder: &eventRecorder{},
+			closeErr: closeErr,
+		},
+		finalizeErr: finalizeErr,
+	}
+	app := New(Config{Logger: discardLogger{}})
+	if err := app.RegisterService(service); err != nil {
+		t.Fatalf("RegisterService() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := app.Start(ctx)
+	for _, want := range []error{finalizeErr, closeErr} {
 		if !errors.Is(err, want) {
 			t.Errorf("Start() error = %v, missing %v", err, want)
 		}

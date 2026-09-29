@@ -54,3 +54,11 @@ type Runner interface {
 type Stopper interface {
 	Stop(ctx context.Context) error
 }
+
+// Finalizer is implemented by application services that must remain available
+// while all other resources stop and close, such as telemetry exporters.
+// Finalize runs after final lifecycle logs and before Close, and must honor ctx.
+// Declared dependencies needed during finalization must also be Finalizers.
+type Finalizer interface {
+	Finalize(ctx context.Context) error
+}

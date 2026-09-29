@@ -120,9 +120,9 @@ func (a *App) Stop(ctx context.Context) error {
 		a.lifecycleMu.Unlock()
 		return fmt.Errorf("fw: application has not been started")
 	case appStateClosed:
-		err := a.shutdownErr
+		stopped := a.stopped
 		a.lifecycleMu.Unlock()
-		return err
+		return a.waitForStopCompletion(ctx, stopped)
 	}
 
 	if !a.stopRequested && a.state != appStateStopping {
@@ -136,7 +136,10 @@ func (a *App) Stop(ctx context.Context) error {
 	}
 	stopped := a.stopped
 	a.lifecycleMu.Unlock()
+	return a.waitForStopCompletion(ctx, stopped)
+}
 
+func (a *App) waitForStopCompletion(ctx context.Context, stopped <-chan struct{}) error {
 	select {
 	case <-stopped:
 		a.lifecycleMu.Lock()
@@ -237,7 +240,7 @@ func (a *App) shutdownStartup(trigger shutdownTrigger, startupErr error, transpo
 	// Runners have not started yet. Prepared transports and modules whose Init
 	// was attempted still get a chance to release partial startup work.
 	stopErr := errors.Join(a.stopTransports(ctx, transports), a.stopModules(ctx))
-	return a.finish(errors.Join(startupErr, stopErr))
+	return a.finish(ctx, errors.Join(startupErr, stopErr))
 }
 
 func (a *App) shutdownRunning(trigger shutdownTrigger, transports []Transport, components *componentGroup) error {
@@ -261,7 +264,7 @@ func (a *App) shutdownRunning(trigger shutdownTrigger, transports []Transport, c
 	serviceStopErr := a.stopApplicationServices(ctx)
 	serviceRunErr := waitForComponents(ctx, components.servicesDone, "application service runners")
 
-	return a.finish(errors.Join(
+	return a.finish(ctx, errors.Join(
 		components.failureError(),
 		moduleStopErr,
 		moduleRunErr,
@@ -297,18 +300,23 @@ func cancellationError(ctx context.Context, err error) bool {
 		errors.Is(err, context.Cause(ctx))
 }
 
-func (a *App) finish(shutdownErr error) error {
+func (a *App) finish(ctx context.Context, shutdownErr error) error {
 	result := errors.Join(shutdownErr, a.closeResources())
 
 	a.lifecycleMu.Lock()
 	previous := a.state
 	a.state = appStateClosed
+	a.lifecycleMu.Unlock()
+	a.logTransition(previous, appStateClosed)
+
+	result = errors.Join(result, a.finalizeApplicationServices(ctx))
+
+	a.lifecycleMu.Lock()
 	a.shutdownErr = result
 	a.stopContext = nil
 	a.runtimeCancel = nil
 	close(a.stopped)
 	a.lifecycleMu.Unlock()
-	a.logTransition(previous, appStateClosed)
 	return result
 }
 
@@ -333,6 +341,9 @@ func (a *App) stopApplicationServices(ctx context.Context) error {
 	var stopErrors []error
 	for i := len(a.preRegistered) - 1; i >= 0; i-- {
 		service := a.preRegistered[i]
+		if _, ok := service.(Finalizer); ok {
+			continue
+		}
 		stopper, ok := service.(Stopper)
 		if !ok {
 			continue

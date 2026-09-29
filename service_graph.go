@@ -44,6 +44,16 @@ func orderApplicationServices(
 					target,
 				)
 			}
+			if _, finalizer := service.(Finalizer); finalizer {
+				if _, dependencyFinalizer := provider.service.(Finalizer); !dependencyFinalizer {
+					return nil, fmt.Errorf(
+						"fw: finalizer application service %q depends on non-finalizer service %q through provider type %v",
+						name,
+						provider.name,
+						target,
+					)
+				}
+			}
 			if _, exists := seen[provider.name]; exists {
 				continue
 			}

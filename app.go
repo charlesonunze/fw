@@ -36,6 +36,8 @@ type App struct {
 	shutdownErr   error
 	closeOnce     sync.Once
 	closeErr      error
+	finalizeOnce  sync.Once
+	finalizeErr   error
 	ready         atomic.Bool
 }
 
@@ -197,6 +199,9 @@ func (a *App) closeResources() error {
 
 		for i := len(a.preRegistered) - 1; i >= 0; i-- {
 			svc := a.preRegistered[i]
+			if _, ok := svc.(Finalizer); ok {
+				continue
+			}
 			a.logger.Info("closing service", "service", svc.Name())
 			if err := svc.Close(); err != nil {
 				a.logger.Error("service close error", "service", svc.Name(), "error", err)
@@ -208,6 +213,36 @@ func (a *App) closeResources() error {
 		a.logger.Info("shutdown complete")
 	})
 	return a.closeErr
+}
+
+func (a *App) finalizeApplicationServices(ctx context.Context) error {
+	a.finalizeOnce.Do(func() {
+		var finalizeErrors []error
+		for i := len(a.preRegistered) - 1; i >= 0; i-- {
+			svc := a.preRegistered[i]
+			finalizer, ok := svc.(Finalizer)
+			if !ok {
+				continue
+			}
+
+			if err := finalizer.Finalize(ctx); err != nil {
+				finalizeErrors = append(finalizeErrors, fmt.Errorf(
+					"fw: finalize application service %q: %w",
+					svc.Name(),
+					err,
+				))
+			}
+			if err := svc.Close(); err != nil {
+				finalizeErrors = append(finalizeErrors, fmt.Errorf(
+					"fw: close application service %q: %w",
+					svc.Name(),
+					err,
+				))
+			}
+		}
+		a.finalizeErr = errors.Join(finalizeErrors...)
+	})
+	return a.finalizeErr
 }
 
 func (a *App) closeModule(mod Module) error {
