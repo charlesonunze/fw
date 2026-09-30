@@ -43,6 +43,17 @@ type graphService struct {
 	closeErr   error
 }
 
+type graphFinalizer struct {
+	graphService
+}
+
+func (s *graphFinalizer) Finalize(context.Context) error {
+	if s.recorder != nil {
+		s.recorder.add("finalize service " + s.name)
+	}
+	return nil
+}
+
 func (s *graphService) Name() string               { return s.name }
 func (*graphService) Health(context.Context) error { return nil }
 func (*graphService) graphDatabase()               {}
@@ -205,6 +216,37 @@ func TestApplicationServiceDependencyValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("finalizer cannot depend on non-finalizer", func(t *testing.T) {
+		app := New(Config{Logger: discardLogger{}})
+		registerGraphService(t, app, &graphFinalizer{graphService: graphService{name: "observability"}},
+			DependsOn[graphDatabase](),
+		)
+		registerGraphService(t, app, &graphService{name: "postgres"}, As[graphDatabase]())
+
+		err := app.setup()
+		if err == nil || !strings.Contains(err.Error(), `finalizer application service "observability" depends on non-finalizer service "postgres"`) {
+			t.Fatalf("setup() error = %v, want unsafe finalizer dependency error", err)
+		}
+	})
+
+	t.Run("finalizer can depend on finalizer", func(t *testing.T) {
+		app := New(Config{Logger: discardLogger{}})
+		registerGraphService(t, app, &graphFinalizer{graphService: graphService{name: "audit"}},
+			DependsOn[graphDatabase](),
+		)
+		registerGraphService(t, app, &graphFinalizer{graphService: graphService{name: "observability"}},
+			As[graphDatabase](),
+		)
+
+		if err := app.setup(); err != nil {
+			t.Fatalf("setup() error = %v", err)
+		}
+		want := []string{"observability", "audit"}
+		if got := serviceNames(app.preRegistered); !reflect.DeepEqual(got, want) {
+			t.Fatalf("service order = %v, want %v", got, want)
+		}
+	})
+
 	t.Run("two service cycle", func(t *testing.T) {
 		app := New(Config{Logger: discardLogger{}})
 		registerGraphService(t, app, &graphService{name: "river"},
@@ -310,6 +352,26 @@ func TestApplicationServiceDependenciesControlShutdownOrder(t *testing.T) {
 	events := recorder.snapshot()
 	assertBefore(t, events, "stop service river", "stop service postgres")
 	assertBefore(t, events, "close service river", "close service postgres")
+}
+
+func TestApplicationServiceFinalizersRespectDependencyOrder(t *testing.T) {
+	recorder := &eventRecorder{}
+	dependent := &graphFinalizer{graphService: graphService{name: "audit", recorder: recorder}}
+	dependency := &graphFinalizer{graphService: graphService{name: "observability", recorder: recorder}}
+	app := New(Config{Logger: discardLogger{}})
+	registerGraphService(t, app, dependent, DependsOn[graphDatabase]())
+	registerGraphService(t, app, dependency, As[graphDatabase]())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := app.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	events := recorder.snapshot()
+	assertBefore(t, events, "finalize service audit", "close service audit")
+	assertBefore(t, events, "close service audit", "finalize service observability")
+	assertBefore(t, events, "finalize service observability", "close service observability")
 }
 
 func TestApplicationServiceDependencyFailureStillClosesServices(t *testing.T) {

@@ -59,6 +59,8 @@ func As[T any]() RegistrationOption {
 // DependsOn does not inject values or sequence Runner readiness. Services must
 // still receive dependencies through ordinary Go constructors and be ready for
 // use when registered; all Runner contexts are cancelled together.
+// Finalizer services may depend only on other Finalizer services so their
+// dependencies remain available through terminal cleanup.
 //
 // DependsOn is only valid with App.RegisterService. Module-owned service
 // dependencies must be declared through Module.Imports.
