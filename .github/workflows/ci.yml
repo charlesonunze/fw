@@ -57,6 +57,12 @@ jobs:
         working-directory: ${{ matrix.directory }}
         run: go build ./...
 
+      - name: Build and smoke-test CLI
+        if: matrix.directory == '.'
+        run: |
+          go build -o "$RUNNER_TEMP/fw" ./cmd/fw
+          "$RUNNER_TEMP/fw" --help
+
       - name: Test
         working-directory: ${{ matrix.directory }}
         run: go test -race -count=1 ./...

@@ -73,6 +73,12 @@ jobs:
           go build ./...
           go test -race -count=1 ./...
 
+      - name: Build and smoke-test CLI
+        if: needs.configure.outputs.directory == '.'
+        run: |
+          go build -o "$RUNNER_TEMP/fw" ./cmd/fw
+          "$RUNNER_TEMP/fw" --help
+
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
