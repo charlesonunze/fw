@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var errStopRequested = errors.New("fw: stop requested")
@@ -105,7 +106,9 @@ func (a *App) Start(ctx context.Context) error {
 
 // Stop requests graceful shutdown and waits for the Start call to finish it.
 // It is safe to call concurrently and repeatedly. The first Stop context sets
-// the shutdown deadline; later callers only control how long they wait.
+// the shutdown deadline; later callers only control how long they wait. When
+// terminal Finalizers are registered, their configured reserve remains inside
+// that deadline rather than extending it.
 func (a *App) Stop(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("fw: stop context is nil")
@@ -236,10 +239,12 @@ func (a *App) shutdownStartup(trigger shutdownTrigger, startupErr error, transpo
 
 	ctx, cancel := a.shutdownContext(trigger.shutdownContext)
 	defer cancel()
+	workCtx, cancelWork := a.shutdownWorkContext(ctx)
+	defer cancelWork()
 
 	// Runners have not started yet. Prepared transports and modules whose Init
 	// was attempted still get a chance to release partial startup work.
-	stopErr := errors.Join(a.stopTransports(ctx, transports), a.stopModules(ctx))
+	stopErr := errors.Join(a.stopTransports(workCtx, transports), a.stopModules(workCtx))
 	return a.finish(ctx, errors.Join(startupErr, stopErr))
 }
 
@@ -250,19 +255,21 @@ func (a *App) shutdownRunning(trigger shutdownTrigger, transports []Transport, c
 
 	ctx, cancel := a.shutdownContext(trigger.shutdownContext)
 	defer cancel()
+	workCtx, cancelWork := a.shutdownWorkContext(ctx)
+	defer cancelWork()
 
 	transportDone := make(chan error, 1)
 	go func() {
-		transportDone <- a.stopTransports(ctx, transports)
+		transportDone <- a.stopTransports(workCtx, transports)
 	}()
 
 	a.cancelRuntime(trigger.cause)
-	moduleStopErr := a.stopModules(ctx)
-	moduleRunErr := waitForComponents(ctx, components.modulesDone, "module runners")
+	moduleStopErr := a.stopModules(workCtx)
+	moduleRunErr := waitForComponents(workCtx, components.modulesDone, "module runners")
 	transportErr := <-transportDone
-	transportRunErr := waitForComponents(ctx, components.transportsDone, "transports")
-	serviceStopErr := a.stopApplicationServices(ctx)
-	serviceRunErr := waitForComponents(ctx, components.servicesDone, "application service runners")
+	transportRunErr := waitForComponents(workCtx, components.transportsDone, "transports")
+	serviceStopErr := a.stopApplicationServices(workCtx)
+	serviceRunErr := waitForComponents(workCtx, components.servicesDone, "application service runners")
 
 	return a.finish(ctx, errors.Join(
 		components.failureError(),
@@ -291,6 +298,42 @@ func (a *App) shutdownContext(parent context.Context) (context.Context, context.
 	return context.WithTimeout(parent, a.shutdownTimeout)
 }
 
+func (a *App) shutdownWorkContext(overall context.Context) (context.Context, context.CancelFunc) {
+	if !a.hasApplicationFinalizers() || a.finalizationTimeout <= 0 {
+		return overall, func() {}
+	}
+	deadline, ok := overall.Deadline()
+	if !ok {
+		return overall, func() {}
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return overall, func() {}
+	}
+
+	reserve := min(a.finalizationTimeout, remaining/2)
+	if reserve <= 0 {
+		return overall, func() {}
+	}
+	return context.WithDeadline(overall, deadline.Add(-reserve))
+}
+
+func (a *App) finalizationContext(overall context.Context) (context.Context, context.CancelFunc) {
+	if a.finalizationTimeout <= 0 {
+		return overall, func() {}
+	}
+	return context.WithTimeout(overall, a.finalizationTimeout)
+}
+
+func (a *App) hasApplicationFinalizers() bool {
+	for _, service := range a.preRegistered {
+		if _, ok := service.(Finalizer); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func cancellationError(ctx context.Context, err error) bool {
 	if ctx.Err() == nil {
 		return false
@@ -309,7 +352,9 @@ func (a *App) finish(ctx context.Context, shutdownErr error) error {
 	a.lifecycleMu.Unlock()
 	a.logTransition(previous, appStateClosed)
 
-	result = errors.Join(result, a.finalizeApplicationServices(ctx))
+	finalizeCtx, cancelFinalize := a.finalizationContext(ctx)
+	result = errors.Join(result, a.finalizeApplicationServices(finalizeCtx))
+	cancelFinalize()
 
 	a.lifecycleMu.Lock()
 	a.shutdownErr = result
