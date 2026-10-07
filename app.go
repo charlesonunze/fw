@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const defaultFinalizationTimeout = 5 * time.Second
+
 // App is the application container that manages modules, services, optional
 // transports, and their shared lifecycle.
 type App struct {
@@ -25,6 +27,7 @@ type App struct {
 	services            *ServiceRegistry
 	moduleScopes        map[ModuleName]*ServiceRegistry
 	shutdownTimeout     time.Duration
+	finalizationTimeout time.Duration
 
 	lifecycleMu   sync.Mutex
 	state         appState
@@ -41,13 +44,17 @@ type App struct {
 	ready         atomic.Bool
 }
 
-// Config configures an App. Logger defaults to a JSON slog logger,
-// ShutdownTimeout defaults to 30 seconds, and an empty Transports slice creates
-// a worker-only application.
+// Config configures an App. Logger defaults to a JSON slog logger, and an empty
+// Transports slice creates a worker-only application.
 type Config struct {
-	Logger          Logger
-	Transports      []Transport
+	Logger     Logger
+	Transports []Transport
+	// ShutdownTimeout bounds cooperative shutdown. Zero defaults to 30 seconds.
 	ShutdownTimeout time.Duration
+	// FinalizationTimeout caps the shared Finalizer phase. Zero defaults to five
+	// seconds. When finalizers exist, up to half the remaining shutdown budget
+	// is reserved for them, without extending the overall deadline.
+	FinalizationTimeout time.Duration
 }
 
 // New creates an App from config.
@@ -56,16 +63,21 @@ func New(config Config) *App {
 	if shutdownTimeout == 0 {
 		shutdownTimeout = defaultShutdownTimeout
 	}
+	finalizationTimeout := config.FinalizationTimeout
+	if finalizationTimeout == 0 {
+		finalizationTimeout = defaultFinalizationTimeout
+	}
 
 	a := &App{
-		transports:      append([]Transport(nil), config.Transports...),
-		health:          newHealthEvaluator(),
-		logger:          config.Logger,
-		services:        NewServiceRegistry(),
-		shutdownTimeout: shutdownTimeout,
-		state:           appStateNew,
-		stopCh:          make(chan struct{}),
-		stopped:         make(chan struct{}),
+		transports:          append([]Transport(nil), config.Transports...),
+		health:              newHealthEvaluator(),
+		logger:              config.Logger,
+		services:            NewServiceRegistry(),
+		shutdownTimeout:     shutdownTimeout,
+		finalizationTimeout: finalizationTimeout,
+		state:               appStateNew,
+		stopCh:              make(chan struct{}),
+		stopped:             make(chan struct{}),
 	}
 	// Unit-level health evaluation remains useful before a transport is started.
 	// Start marks the app unavailable until startup completes.
@@ -125,6 +137,9 @@ func (a *App) setup() error {
 	}
 	if a.shutdownTimeout < 0 {
 		return fmt.Errorf("fw: shutdown timeout cannot be negative")
+	}
+	if a.finalizationTimeout < 0 {
+		return fmt.Errorf("fw: finalization timeout cannot be negative")
 	}
 	orderedServices, err := orderApplicationServices(
 		a.preRegistered,

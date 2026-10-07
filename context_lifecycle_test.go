@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -98,6 +99,8 @@ type managedFinalizer struct {
 	managedService
 	finalizeStarted chan struct{}
 	releaseFinalize chan struct{}
+	finalizeCtxErr  chan error
+	finalizeBudget  chan time.Duration
 	finalizeErr     error
 }
 
@@ -105,6 +108,13 @@ func (s *managedFinalizer) Finalize(ctx context.Context) error {
 	s.recorder.add("finalize service " + s.name)
 	if s.finalizeStarted != nil {
 		close(s.finalizeStarted)
+	}
+	if s.finalizeCtxErr != nil {
+		s.finalizeCtxErr <- ctx.Err()
+	}
+	if s.finalizeBudget != nil {
+		deadline, _ := ctx.Deadline()
+		s.finalizeBudget <- time.Until(deadline)
 	}
 	if s.releaseFinalize != nil {
 		select {
@@ -405,6 +415,17 @@ type blockingStopModule struct {
 	releaseStop chan struct{}
 }
 
+type blockingStopService struct {
+	managedService
+	stopStarted chan struct{}
+}
+
+func (s *blockingStopService) Stop(ctx context.Context) error {
+	close(s.stopStarted)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 func (m *blockingStopModule) Stop(ctx context.Context) error {
 	close(m.stopStarted)
 	select {
@@ -504,6 +525,221 @@ func TestFinalizerRunsAfterLifecycleLogsAndBlocksStop(t *testing.T) {
 	}
 }
 
+func TestFinalizerReceivesReservedShutdownContext(t *testing.T) {
+	tests := []struct {
+		name                string
+		shutdownTimeout     time.Duration
+		finalizationTimeout time.Duration
+		callerTimeout       time.Duration
+		withoutFinalizer    bool
+		wantWork            time.Duration
+		wantReserve         time.Duration
+	}{
+		{name: "defaults", wantWork: 25 * time.Second, wantReserve: 5 * time.Second},
+		{name: "custom", shutdownTimeout: 200 * time.Millisecond, finalizationTimeout: 80 * time.Millisecond, wantWork: 120 * time.Millisecond, wantReserve: 80 * time.Millisecond},
+		{name: "short caller deadline", callerTimeout: 120 * time.Millisecond, wantWork: 60 * time.Millisecond, wantReserve: 60 * time.Millisecond},
+		{name: "oversized reserve", shutdownTimeout: 200 * time.Millisecond, finalizationTimeout: time.Second, wantWork: 100 * time.Millisecond, wantReserve: 100 * time.Millisecond},
+		{name: "no finalizers", shutdownTimeout: 200 * time.Millisecond, withoutFinalizer: true, wantWork: 200 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				recorder := &eventRecorder{}
+				slowService := &blockingStopService{
+					managedService: managedService{name: "river", recorder: recorder},
+					stopStarted:    make(chan struct{}),
+				}
+				finalizer := &managedFinalizer{
+					managedService: managedService{name: "observability", recorder: recorder},
+					finalizeCtxErr: make(chan error, 1),
+					finalizeBudget: make(chan time.Duration, 1),
+				}
+				app := New(Config{
+					Logger:              discardLogger{},
+					ShutdownTimeout:     tt.shutdownTimeout,
+					FinalizationTimeout: tt.finalizationTimeout,
+				})
+				if err := app.RegisterService(slowService); err != nil {
+					t.Fatal(err)
+				}
+				if !tt.withoutFinalizer {
+					if err := app.RegisterService(finalizer); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				startDone := make(chan error, 1)
+				go func() { startDone <- app.Start(t.Context()) }()
+				synctest.Wait()
+				ctx := t.Context()
+				if tt.callerTimeout > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, tt.callerTimeout)
+					defer cancel()
+				}
+
+				startedAt := time.Now()
+				if err := app.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("Stop() error = %v, want shutdown deadline error", err)
+				}
+				if err := <-startDone; !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("Start() error = %v, want shutdown deadline error", err)
+				}
+				if elapsed := time.Since(startedAt); elapsed != tt.wantWork {
+					t.Fatalf("shutdown work took %s, want %s", elapsed, tt.wantWork)
+				}
+				if !tt.withoutFinalizer {
+					if err := <-finalizer.finalizeCtxErr; err != nil {
+						t.Fatalf("Finalize() context error = %v, want active context", err)
+					}
+					if budget := <-finalizer.finalizeBudget; budget != tt.wantReserve {
+						t.Fatalf("Finalize() budget = %s, want %s", budget, tt.wantReserve)
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestFinalizationTimeoutCapsTerminalPhase(t *testing.T) {
+	tests := []struct {
+		name            string
+		shutdownTimeout time.Duration
+		callerTimeout   time.Duration
+		wantDuration    time.Duration
+	}{
+		{name: "finalizer cap", shutdownTimeout: time.Second, wantDuration: 40 * time.Millisecond},
+		{name: "short caller deadline", shutdownTimeout: time.Second, callerTimeout: 20 * time.Millisecond, wantDuration: 20 * time.Millisecond},
+		{name: "short shutdown timeout", shutdownTimeout: 20 * time.Millisecond, wantDuration: 20 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				recorder := &eventRecorder{}
+				ctxErrors := make(chan error, 2)
+				app := New(Config{
+					Logger:              discardLogger{},
+					ShutdownTimeout:     tt.shutdownTimeout,
+					FinalizationTimeout: 40 * time.Millisecond,
+				})
+				for _, name := range []string{"logs", "traces"} {
+					finalizer := &managedFinalizer{
+						managedService:  managedService{name: name, recorder: recorder},
+						releaseFinalize: make(chan struct{}),
+						finalizeCtxErr:  ctxErrors,
+					}
+					if err := app.RegisterService(finalizer); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				startDone := make(chan error, 1)
+				go func() { startDone <- app.Start(t.Context()) }()
+				synctest.Wait()
+				ctx := t.Context()
+				if tt.callerTimeout > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, tt.callerTimeout)
+					defer cancel()
+				}
+
+				startedAt := time.Now()
+				if err := app.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("Stop() error = %v, want finalization deadline error", err)
+				}
+				if err := <-startDone; !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("Start() error = %v, want finalization deadline error", err)
+				}
+				if elapsed := time.Since(startedAt); elapsed != tt.wantDuration {
+					t.Fatalf("Stop() elapsed = %s, want shared %s finalization budget", elapsed, tt.wantDuration)
+				}
+				if err := <-ctxErrors; err != nil {
+					t.Fatalf("first Finalize() context error = %v, want nil", err)
+				}
+				if err := <-ctxErrors; !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("second Finalize() context error = %v, want deadline exceeded", err)
+				}
+				events := recorder.snapshot()
+				assertContains(t, events, "close service logs")
+				assertContains(t, events, "close service traces")
+			})
+		})
+	}
+}
+
+func TestStartupFailureReservesFinalizationBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		recorder := &eventRecorder{}
+		prepareErr := errors.New("listen failed")
+		module := &blockingStopModule{
+			managedModule: managedModule{name: "todo", recorder: recorder},
+			stopStarted:   make(chan struct{}),
+		}
+		finalizer := &managedFinalizer{
+			managedService: managedService{name: "observability", recorder: recorder},
+			finalizeCtxErr: make(chan error, 1),
+			finalizeBudget: make(chan time.Duration, 1),
+		}
+		app := New(Config{
+			Logger:              discardLogger{},
+			Transports:          []Transport{&managedTransport{name: "http", prepareErr: prepareErr}},
+			ShutdownTimeout:     200 * time.Millisecond,
+			FinalizationTimeout: 80 * time.Millisecond,
+		})
+		app.RegisterModules(module)
+		if err := app.RegisterService(finalizer); err != nil {
+			t.Fatal(err)
+		}
+
+		startedAt := time.Now()
+		err := app.Start(t.Context())
+		if !errors.Is(err, prepareErr) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Start() error = %v, want preparation and stop errors", err)
+		}
+		if elapsed := time.Since(startedAt); elapsed != 120*time.Millisecond {
+			t.Fatalf("startup cleanup took %s, want 120ms", elapsed)
+		}
+		if err := <-finalizer.finalizeCtxErr; err != nil {
+			t.Fatalf("Finalize() context error = %v, want active context", err)
+		}
+		if budget := <-finalizer.finalizeBudget; budget != 80*time.Millisecond {
+			t.Fatalf("Finalize() budget = %s, want 80ms", budget)
+		}
+		assertBefore(t, recorder.snapshot(), "close module todo", "finalize service observability")
+	})
+}
+
+func TestStopCancellationReachesFinalizer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		finalizer := &managedFinalizer{
+			managedService:  managedService{name: "observability", recorder: &eventRecorder{}},
+			finalizeStarted: make(chan struct{}),
+			releaseFinalize: make(chan struct{}),
+		}
+		app := New(Config{Logger: discardLogger{}})
+		if err := app.RegisterService(finalizer); err != nil {
+			t.Fatal(err)
+		}
+		startDone := make(chan error, 1)
+		go func() { startDone <- app.Start(t.Context()) }()
+		synctest.Wait()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		stopDone := make(chan error, 1)
+		go func() { stopDone <- app.Stop(ctx) }()
+		<-finalizer.finalizeStarted
+		cancel()
+
+		if err := <-stopDone; !errors.Is(err, context.Canceled) {
+			t.Fatalf("Stop() error = %v, want cancellation", err)
+		}
+		if err := <-startDone; !errors.Is(err, context.Canceled) {
+			t.Fatalf("Start() error = %v, want cancellation", err)
+		}
+		assertContains(t, finalizer.recorder.snapshot(), "close service observability")
+	})
+}
+
 func TestFinalizerErrorsAreAggregated(t *testing.T) {
 	finalizeErr := errors.New("flush failed")
 	closeErr := errors.New("exporter close failed")
@@ -513,7 +749,8 @@ func TestFinalizerErrorsAreAggregated(t *testing.T) {
 			recorder: &eventRecorder{},
 			closeErr: closeErr,
 		},
-		finalizeErr: finalizeErr,
+		finalizeErr:    finalizeErr,
+		finalizeCtxErr: make(chan error, 1),
 	}
 	app := New(Config{Logger: discardLogger{}})
 	if err := app.RegisterService(service); err != nil {
@@ -527,6 +764,9 @@ func TestFinalizerErrorsAreAggregated(t *testing.T) {
 		if !errors.Is(err, want) {
 			t.Errorf("Start() error = %v, missing %v", err, want)
 		}
+	}
+	if err := <-service.finalizeCtxErr; err != nil {
+		t.Fatalf("Finalize() context error = %v, want fresh shutdown context after startup cancellation", err)
 	}
 }
 

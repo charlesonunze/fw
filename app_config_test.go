@@ -14,9 +14,10 @@ func TestNewAppliesConfigAndCopiesTransports(t *testing.T) {
 	transports := []Transport{first}
 
 	app := New(Config{
-		Logger:          logger,
-		Transports:      transports,
-		ShutdownTimeout: time.Second,
+		Logger:              logger,
+		Transports:          transports,
+		ShutdownTimeout:     time.Second,
+		FinalizationTimeout: 100 * time.Millisecond,
 	})
 	transports[0] = second
 
@@ -29,6 +30,9 @@ func TestNewAppliesConfigAndCopiesTransports(t *testing.T) {
 	if app.shutdownTimeout != time.Second {
 		t.Fatalf("New() shutdown timeout = %s, want %s", app.shutdownTimeout, time.Second)
 	}
+	if app.finalizationTimeout != 100*time.Millisecond {
+		t.Fatalf("New() finalization timeout = %s, want %s", app.finalizationTimeout, 100*time.Millisecond)
+	}
 }
 
 func TestNewAppliesDefaults(t *testing.T) {
@@ -40,8 +44,23 @@ func TestNewAppliesDefaults(t *testing.T) {
 	if app.shutdownTimeout != defaultShutdownTimeout {
 		t.Fatalf("New() shutdown timeout = %s, want default %s", app.shutdownTimeout, defaultShutdownTimeout)
 	}
+	if app.finalizationTimeout != defaultFinalizationTimeout {
+		t.Fatalf("New() finalization timeout = %s, want default %s", app.finalizationTimeout, defaultFinalizationTimeout)
+	}
 	if len(app.transports) != 0 {
 		t.Fatalf("New() transports = %v, want worker-only application", app.transports)
+	}
+}
+
+func TestStartRejectsNegativeFinalizationTimeout(t *testing.T) {
+	app := New(Config{
+		Logger:              discardLogger{},
+		FinalizationTimeout: -time.Second,
+	})
+
+	err := app.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "finalization timeout cannot be negative") {
+		t.Fatalf("Start() error = %v, want negative finalization timeout error", err)
 	}
 }
 
