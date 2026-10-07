@@ -37,8 +37,8 @@ type Config struct {
 
 // Transport owns one HTTP server runtime.
 type Transport struct {
-	config Config
-	router Router
+	config  Config
+	adapter Adapter
 
 	mu       sync.Mutex
 	logger   fw.Logger
@@ -60,11 +60,11 @@ type addressSnapshot struct {
 func (a addressSnapshot) Network() string { return a.network }
 func (a addressSnapshot) String() string  { return a.value }
 
-// New creates an HTTP transport using router and config. Network resources are
+// New creates an HTTP transport using adapter and config. Network resources are
 // acquired by Prepare when the application starts.
-func New(router Router, config Config) *Transport {
+func New(adapter Adapter, config Config) *Transport {
 	config.Middleware = append([]Middleware(nil), config.Middleware...)
-	return &Transport{config: config, router: router}
+	return &Transport{config: config, adapter: adapter}
 }
 
 // Name returns the transport's operational name.
@@ -92,8 +92,8 @@ func (t *Transport) Prepare(ctx context.Context, deps fw.TransportDeps) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if t.router == nil {
-		return errors.New("http transport requires a router")
+	if t.adapter == nil {
+		return errors.New("http transport requires an adapter")
 	}
 	if deps.Health == nil {
 		return errors.New("http transport requires a health evaluator")
@@ -108,7 +108,7 @@ func (t *Transport) Prepare(ctx context.Context, deps fw.TransportDeps) error {
 		return errors.New("http transport is already prepared")
 	}
 
-	var handler http.Handler = t.router
+	var handler http.Handler = t.adapter
 	for i := len(t.config.Middleware) - 1; i >= 0; i-- {
 		if t.config.Middleware[i] == nil {
 			return fmt.Errorf("http middleware %d is nil", i)
@@ -134,13 +134,10 @@ func (t *Transport) Prepare(ctx context.Context, deps fw.TransportDeps) error {
 		}
 	}()
 
-	for _, module := range deps.Modules {
-		if httpModule, ok := module.(Module); ok {
-			httpModule.RegisterRoutes(t.router)
-		}
+	if err := t.adapter.RegisterModules(deps.Modules); err != nil {
+		return fmt.Errorf("register http modules: %w", err)
 	}
-	t.router.Get("/health/live", livenessHandler())
-	t.router.Get("/health/ready", readinessHandler(deps.Health))
+	t.adapter.RegisterHealth(livenessHandler(), readinessHandler(deps.Health))
 
 	server := t.config.Server
 	if server == nil {

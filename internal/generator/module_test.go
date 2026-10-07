@@ -13,7 +13,7 @@ import (
 func TestNewModuleCreatesFlatPrefixedPackage(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{Router: routerChi}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 
@@ -69,7 +69,7 @@ func TestNewModuleCreatesFlatPrefixedPackage(t *testing.T) {
 		"func (m *Module) Register(deps *fw.Deps) error",
 		"fw.As[Service]()",
 		"func (m *Module) Init(_ context.Context, _ *fw.Deps) error",
-		"func (m *Module) RegisterRoutes(r fwhttp.Router)",
+		"func (m *Module) RegisterRoutes(r chi.Router)",
 	} {
 		if !strings.Contains(string(wiring), declaration) {
 			t.Errorf("generated module missing %q:\n%s", declaration, wiring)
@@ -256,10 +256,10 @@ func TestModuleTransportValidation(t *testing.T) {
 func TestNewModuleRejectsExistingModule(t *testing.T) {
 	t.Chdir(t.TempDir())
 
-	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{Router: routerChi}); err != nil {
 		t.Fatalf("first NewModule() error = %v", err)
 	}
-	if err := NewModule("user", "example.com/app", ModuleConfig{}); err == nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{Router: routerChi}); err == nil {
 		t.Fatal("second NewModule() error = nil, want existing module error")
 	}
 }
@@ -268,14 +268,14 @@ func TestNewModuleRejectsUnsafeInputBeforeCreatingFiles(t *testing.T) {
 	workspace := t.TempDir()
 	t.Chdir(workspace)
 
-	if err := NewModule("../user", "example.com/app", ModuleConfig{}); err == nil {
+	if err := NewModule("../user", "example.com/app", ModuleConfig{Router: routerChi}); err == nil {
 		t.Fatal("NewModule() error = nil, want invalid module name error")
 	}
 	if _, err := os.Lstat("internal"); !os.IsNotExist(err) {
 		t.Fatalf("module directories created for invalid name; stat error = %v", err)
 	}
 
-	if err := NewModule("user", "example.com/app\nreplace evil.invalid => /tmp", ModuleConfig{}); err == nil {
+	if err := NewModule("user", "example.com/app\nreplace evil.invalid => /tmp", ModuleConfig{Router: routerChi}); err == nil {
 		t.Fatal("NewModule() error = nil, want invalid module path error")
 	}
 	if _, err := os.Lstat("internal"); !os.IsNotExist(err) {
