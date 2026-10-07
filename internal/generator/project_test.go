@@ -73,7 +73,7 @@ func TestValidateRouter(t *testing.T) {
 	}
 }
 
-func TestNewProjectCompiles(t *testing.T) {
+func TestNewProjectCompilesAndServesNativeRoutes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping generated project compilation in short mode")
 	}
@@ -99,12 +99,68 @@ func TestNewProjectCompiles(t *testing.T) {
 			if err := NewModule("user", "example.com/"+project, ModuleConfig{}); err != nil {
 				t.Fatalf("NewModule() error = %v", err)
 			}
+			writeNativeRouteTest(t, ".", "example.com/"+project+"/internal/modules/user", router)
+			if got, err := ResolveRouter(".", ""); err != nil || got != router {
+				t.Fatalf("project router = %q, %v; want %q", got, err, router)
+			}
 			if err := runGo(".", "test", "./..."); err != nil {
 				t.Fatalf("generated %s project does not compile: %v", router, err)
 			}
 		})
 	}
 }
+
+func writeNativeRouteTest(t *testing.T, dir, userImport, router string) {
+	t.Helper()
+	data := struct{ UserImport, Router string }{userImport, router}
+	if err := writeTemplate(filepath.Join(dir, "native_routes_test.go"), nativeRoutesTestTmpl, data); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const nativeRoutesTestTmpl = `package application_test
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	user "{{ .UserImport }}"
+	"github.com/charlesonunze/fw"
+	fwrouter "github.com/charlesonunze/fw/adapters/{{ .Router }}"
+	{{- if eq .Router "gin" }}
+	"github.com/gin-gonic/gin"
+	{{- else }}
+	"github.com/go-chi/chi/v5"
+	{{- end }}
+)
+
+func TestNativeUserRoute(t *testing.T) {
+	deps := &fw.Deps{Services: fw.NewServiceRegistry()}
+	module := user.New()
+	if err := module.Register(deps); err != nil { t.Fatal(err) }
+	t.Cleanup(func() { if err := module.Close(); err != nil { t.Error(err) } })
+	if err := module.Init(t.Context(), deps); err != nil { t.Fatal(err) }
+	service, err := fw.GetService[user.Service](deps.Services)
+	if err != nil { t.Fatal(err) }
+	entity := &user.User{}
+	if err := service.Create(t.Context(), entity); err != nil { t.Fatal(err) }
+	{{- if eq .Router "gin" }}
+	gin.SetMode(gin.TestMode)
+	adapter := fwrouter.NewAdapter(gin.New())
+	{{- else }}
+	adapter := fwrouter.NewAdapter(chi.NewRouter())
+	{{- end }}
+	if err := adapter.RegisterModules([]fw.Module{module}); err != nil { t.Fatal(err) }
+	recorder := httptest.NewRecorder()
+	adapter.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/users/"+entity.ID, nil))
+	if recorder.Code != http.StatusOK { t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body) }
+	var got user.User
+	if err := json.NewDecoder(recorder.Body).Decode(&got); err != nil { t.Fatal(err) }
+	if got.ID != entity.ID { t.Fatalf("ID = %q, want %q", got.ID, entity.ID) }
+}
+`
 
 func TestRelativeReplacementPath(t *testing.T) {
 	root := t.TempDir()

@@ -1,11 +1,11 @@
-// Package chi provides an fwhttp.Router adapter for the go-chi/chi router.
+// Package chi connects native Chi HTTP modules to fw's HTTP transport.
 //
 // Usage:
 //
 //	import fwchi "github.com/charlesonunze/fw/adapters/chi"
 //
 //	r := chi.NewRouter()
-//	httpTransport := fwhttp.New(fwchi.NewRouter(r), fwhttp.Config{
+//	httpTransport := fwhttp.New(fwchi.NewAdapter(r), fwhttp.Config{
 //		Middleware: []fwhttp.Middleware{tracingMiddleware},
 //	})
 //	app := fw.New(fw.Config{Transports: []fw.Transport{httpTransport}})
@@ -17,26 +17,30 @@ package chi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
 
+	"github.com/charlesonunze/fw"
 	fwhttp "github.com/charlesonunze/fw/transport/http"
 	chi "github.com/go-chi/chi/v5"
 )
 
-type chiRouter struct {
+// Module exposes native Chi routes with standard HTTP handlers and middleware.
+type Module interface {
+	RegisterRoutes(chi.Router)
+}
+
+// Adapter registers module routes on a caller-configured Chi router.
+type Adapter struct {
 	r             chi.Router
 	routeContexts sync.Pool
 }
 
-// NewRouter wraps a pre-configured chi.Router as an fwhttp.Router.
-func NewRouter(r chi.Router) fwhttp.Router {
-	return newRouter(r)
-}
-
-func newRouter(r chi.Router) *chiRouter {
-	return &chiRouter{
+// NewAdapter connects r to an fw HTTP transport.
+func NewAdapter(r chi.Router) *Adapter {
+	return &Adapter{
 		r: r,
 		routeContexts: sync.Pool{New: func() any {
 			return chi.NewRouteContext()
@@ -44,7 +48,7 @@ func newRouter(r chi.Router) *chiRouter {
 	}
 }
 
-func (c *chiRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (c *Adapter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if routeContext := chi.RouteContext(r.Context()); routeContext != nil {
 		c.r.ServeHTTP(w, r)
 		setRequestPattern(r, routeContext)
@@ -65,7 +69,7 @@ func (c *chiRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.r.ServeHTTP(w, routedRequest)
 }
 
-func (c *chiRouter) setResolvedRequestPattern(r *http.Request, routeContext *chi.Context) {
+func (c *Adapter) setResolvedRequestPattern(r *http.Request, routeContext *chi.Context) {
 	pattern := routeContext.RoutePattern()
 	if pattern == "" || strings.HasSuffix(pattern, "/*") {
 		routeContext.Reset()
@@ -84,31 +88,18 @@ func setRequestPattern(r *http.Request, routeContext *chi.Context) {
 	}
 }
 
-func (c *chiRouter) Get(path string, h http.HandlerFunc)    { c.r.Get(path, h) }
-func (c *chiRouter) Post(path string, h http.HandlerFunc)   { c.r.Post(path, h) }
-func (c *chiRouter) Put(path string, h http.HandlerFunc)    { c.r.Put(path, h) }
-func (c *chiRouter) Delete(path string, h http.HandlerFunc) { c.r.Delete(path, h) }
-func (c *chiRouter) Patch(path string, h http.HandlerFunc)  { c.r.Patch(path, h) }
-
-func (c *chiRouter) Handle(method, path string, h http.HandlerFunc) {
-	c.r.Method(method, path, h)
-}
-
-func (c *chiRouter) Group(prefix string, middleware ...func(http.Handler) http.Handler) fwhttp.Router {
-	sub := chi.NewRouter()
-	for _, m := range middleware {
-		sub.Use(m)
+// RegisterModules registers native Chi modules and rejects other HTTP modules.
+func (c *Adapter) RegisterModules(modules []fw.Module) error {
+	if c == nil || c.r == nil {
+		return errors.New("chi adapter requires a router")
 	}
-	c.r.Mount(prefix, sub)
-	return newRouter(sub)
+	return fwhttp.RegisterModules[chi.Router](modules, c.r)
 }
 
-func (c *chiRouter) Use(middleware ...func(http.Handler) http.Handler) {
-	for _, m := range middleware {
-		c.r.Use(m)
-	}
+// RegisterHealth exposes the HTTP transport's health handlers.
+func (c *Adapter) RegisterHealth(live, ready http.HandlerFunc) {
+	c.r.Get("/health/live", live)
+	c.r.Get("/health/ready", ready)
 }
 
-func (c *chiRouter) Mount(pattern string, h http.Handler) {
-	c.r.Mount(pattern, h)
-}
+var _ fwhttp.Adapter = (*Adapter)(nil)

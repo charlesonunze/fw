@@ -56,23 +56,12 @@ func (r *testRouter) add(method, path string, handler http.HandlerFunc) {
 }
 
 func (r *testRouter) Get(path string, handler http.HandlerFunc) { r.add(http.MethodGet, path, handler) }
-func (r *testRouter) Post(path string, handler http.HandlerFunc) {
-	r.add(http.MethodPost, path, handler)
+func (r *testRouter) RegisterModules(modules []fw.Module) error {
+	return RegisterModules(modules, r)
 }
-func (r *testRouter) Put(path string, handler http.HandlerFunc) { r.add(http.MethodPut, path, handler) }
-func (r *testRouter) Delete(path string, handler http.HandlerFunc) {
-	r.add(http.MethodDelete, path, handler)
-}
-func (r *testRouter) Patch(path string, handler http.HandlerFunc) {
-	r.add(http.MethodPatch, path, handler)
-}
-func (r *testRouter) Handle(method, path string, handler http.HandlerFunc) {
-	r.add(method, path, handler)
-}
-func (r *testRouter) Group(string, ...func(http.Handler) http.Handler) Router { return r }
-func (*testRouter) Use(...func(http.Handler) http.Handler)                    {}
-func (r *testRouter) Mount(pattern string, handler http.Handler) {
-	r.add(http.MethodGet, pattern, handler.ServeHTTP)
+func (r *testRouter) RegisterHealth(live, ready http.HandlerFunc) {
+	r.Get("/health/live", live)
+	r.Get("/health/ready", ready)
 }
 
 type testModule struct {
@@ -85,7 +74,7 @@ func (*testModule) Register(*fw.Deps) error              { return nil }
 func (*testModule) Init(context.Context, *fw.Deps) error { return nil }
 func (*testModule) Health(context.Context) error         { return nil }
 func (*testModule) Close() error                         { return nil }
-func (m *testModule) RegisterRoutes(Router)              { m.registrations++ }
+func (m *testModule) RegisterRoutes(*testRouter)         { m.registrations++ }
 
 func testDeps(modules ...fw.Module) fw.TransportDeps {
 	return fw.TransportDeps{
@@ -176,11 +165,11 @@ func TestPreparePreservesCustomServerSettings(t *testing.T) {
 	}
 }
 
-func TestPrepareRequiresRouter(t *testing.T) {
+func TestPrepareRequiresAdapter(t *testing.T) {
 	transport := New(nil, Config{})
 	err := transport.Prepare(context.Background(), testDeps())
-	if err == nil || !strings.Contains(err.Error(), "requires a router") {
-		t.Fatalf("Prepare() error = %v, want missing router error", err)
+	if err == nil || !strings.Contains(err.Error(), "requires an adapter") {
+		t.Fatalf("Prepare() error = %v, want missing adapter error", err)
 	}
 }
 

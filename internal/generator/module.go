@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	// ModuleTransportHTTP generates a net/http-compatible module handler.
+	// ModuleTransportHTTP generates a native router-specific module handler.
 	ModuleTransportHTTP = "http"
 	// ModuleTransportGRPC generates protobuf definitions and a gRPC handler.
 	ModuleTransportGRPC = "grpc"
@@ -17,6 +17,7 @@ const (
 // ModuleConfig configures generated module boundaries.
 type ModuleConfig struct {
 	Transport string
+	Router    string
 }
 
 type moduleData struct {
@@ -24,6 +25,7 @@ type moduleData struct {
 	Pascal     string // PascalCase, e.g. "User"
 	ModulePath string // go module path, e.g. "github.com/you/myapp"
 	Transport  string
+	Router     string
 }
 
 // NewModule generates a flat, self-contained module package.
@@ -38,6 +40,13 @@ func NewModule(name, modPath string, config ModuleConfig) (err error) {
 	if err != nil {
 		return err
 	}
+	var router string
+	if transport == ModuleTransportHTTP {
+		router, err = ResolveRouter(".", config.Router)
+		if err != nil {
+			return err
+		}
+	}
 	if transport == ModuleTransportGRPC {
 		if err := checkProtoTools(); err != nil {
 			return err
@@ -49,6 +58,7 @@ func NewModule(name, modPath string, config ModuleConfig) (err error) {
 		Pascal:     pascal(name),
 		ModulePath: modPath,
 		Transport:  transport,
+		Router:     router,
 	}
 
 	base := filepath.Join("internal", "modules", name)
@@ -73,7 +83,11 @@ func NewModule(name, modPath string, config ModuleConfig) (err error) {
 	}
 	switch transport {
 	case ModuleTransportHTTP:
-		files = append(files, moduleFile{filepath.Join(base, name+"_http.go"), moduleHTTPTmpl})
+		tmpl := moduleHTTPTmpl
+		if router == routerGin {
+			tmpl = moduleGinHTTPTmpl
+		}
+		files = append(files, moduleFile{filepath.Join(base, name+"_http.go"), tmpl})
 	case ModuleTransportGRPC:
 		files = append(files, moduleFile{filepath.Join(base, name+"_grpc.go"), moduleGRPCTmpl})
 	}
@@ -233,6 +247,8 @@ var moduleHTTPTmpl = `package {{ .Name }}
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // HTTPHandler handles HTTP requests for the {{ .Name }} module.
@@ -247,7 +263,7 @@ func NewHTTPHandler(service Service) *HTTPHandler {
 
 // GetByID handles GET /{{ .Name }}s/{id}.
 func (h *HTTPHandler) GetByID(w http.ResponseWriter, r *http.Request) {
-	entity, err := h.service.GetByID(r.Context(), r.PathValue("id"))
+	entity, err := h.service.GetByID(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "{{ .Name }} not found"})
 		return
@@ -260,6 +276,35 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+`
+
+var moduleGinHTTPTmpl = `package {{ .Name }}
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+// HTTPHandler handles HTTP requests for the {{ .Name }} module.
+type HTTPHandler struct {
+	service Service
+}
+
+// NewHTTPHandler creates an HTTPHandler.
+func NewHTTPHandler(service Service) *HTTPHandler {
+	return &HTTPHandler{service: service}
+}
+
+// GetByID handles GET /{{ .Name }}s/:id.
+func (h *HTTPHandler) GetByID(c *gin.Context) {
+	entity, err := h.service.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "{{ .Name }} not found"})
+		return
+	}
+	c.JSON(http.StatusOK, entity)
 }
 `
 
@@ -310,7 +355,12 @@ import (
 
 	"github.com/charlesonunze/fw"
 	{{- if eq .Transport "http" }}
-	fwhttp "github.com/charlesonunze/fw/transport/http"
+	fwrouter "github.com/charlesonunze/fw/adapters/{{ .Router }}"
+	{{- if eq .Router "gin" }}
+	"github.com/gin-gonic/gin"
+	{{- else }}
+	"github.com/go-chi/chi/v5"
+	{{- end }}
 	{{- end }}
 )
 
@@ -357,9 +407,19 @@ func (m *Module) Init(_ context.Context, _ *fw.Deps) error {
 
 	{{- if eq .Transport "http" }}
 // RegisterRoutes exposes the module's HTTP routes.
-func (m *Module) RegisterRoutes(r fwhttp.Router) {
-	r.Group("/{{ .Name }}s").Get("/{id}", m.handler.GetByID)
+{{- if eq .Router "gin" }}
+func (m *Module) RegisterRoutes(r gin.IRouter) {
+	r.Group("/{{ .Name }}s").GET("/:id", m.handler.GetByID)
 }
+{{- else }}
+func (m *Module) RegisterRoutes(r chi.Router) {
+	r.Route("/{{ .Name }}s", func(r chi.Router) {
+		r.Get("/{id}", m.handler.GetByID)
+	})
+}
+{{- end }}
+
+var _ fwrouter.Module = (*Module)(nil)
 	{{- end }}
 
 // Health reports whether the module is ready.

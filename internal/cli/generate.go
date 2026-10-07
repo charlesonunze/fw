@@ -27,6 +27,7 @@ Supported transports are http, grpc, and none. HTTP is the default.`,
 		}
 		return generator.NewModule(args[0], modPath, generator.ModuleConfig{
 			Transport: generateModuleTransport,
+			Router:    generateModuleRouter,
 		})
 	},
 }
@@ -64,6 +65,7 @@ Without arguments: regenerates Go code for all .proto files under proto/.`,
 }
 
 func init() {
+	generateModuleCmd.Flags().StringVar(&generateModuleRouter, "router", "", "HTTP router: chi or gin (defaults to .fw.json)")
 	generateModuleCmd.Flags().StringVar(
 		&generateModuleTransport,
 		"transport",
@@ -77,3 +79,4 @@ func init() {
 }
 
 var generateModuleTransport string
+var generateModuleRouter string

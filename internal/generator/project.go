@@ -59,6 +59,9 @@ func NewProject(name, modulePath, router, localFWPath string) (err error) {
 	if err = writeDevelopmentFiles(name); err != nil {
 		return err
 	}
+	if err = writeRouterMetadata(name, router); err != nil {
+		return err
+	}
 
 	fmt.Printf("  init   go mod\n")
 	if err = runGo(name, "mod", "init", modulePath); err != nil {
@@ -206,7 +209,7 @@ func main() {
 {{- else }}
 	router := gin.New()
 {{- end }}
-	httpTransport := fwhttp.New(fwrouter.NewRouter(router), fwhttp.Config{
+	httpTransport := fwhttp.New(fwrouter.NewAdapter(router), fwhttp.Config{
 		Addr: ":8080",
 	})
 	app := fw.New(fw.Config{

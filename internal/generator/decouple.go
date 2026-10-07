@@ -46,7 +46,8 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 		return fmt.Errorf("unsupported transport %q: use http or grpc", transport)
 	}
 	if transport == "http" {
-		if err := validateRouter(router); err != nil {
+		router, err = ResolveRouter(".", router)
+		if err != nil {
 			return err
 		}
 	}
@@ -71,12 +72,12 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 			name, name, name,
 		)
 	}
-	supported, err := moduleSupportsTransport(name, transport)
+	supported, err := moduleSupportsTransport(name, transport, router)
 	if err != nil {
 		return fmt.Errorf("inspect module transport: %w", err)
 	}
 	if !supported {
-		interfaceName := "fwhttp.Module"
+		interfaceName := "fw" + router + ".Module"
 		methodName := "RegisterRoutes"
 		if transport == "grpc" {
 			interfaceName = "fwgrpc.Module"
@@ -172,6 +173,11 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 	if err = writeDevelopmentFiles(output); err != nil {
 		return err
 	}
+	if transport == "http" {
+		if err = writeRouterMetadata(output, router); err != nil {
+			return err
+		}
+	}
 
 	// Write go.mod (not a template — content is built dynamically)
 	fmt.Printf("  create go.mod\n")
@@ -247,7 +253,7 @@ func findServiceFile(name string) (string, error) {
 	return "", os.ErrNotExist
 }
 
-func moduleSupportsTransport(name, transport string) (bool, error) {
+func moduleSupportsTransport(name, transport, router string) (bool, error) {
 	methodName := "RegisterRoutes"
 	if transport == "grpc" {
 		methodName = "RegisterGRPC"
@@ -280,7 +286,7 @@ func moduleSupportsTransport(name, transport string) (bool, error) {
 				moduleType, _ = referenceType(function.Type.Results.List[0].Type)
 				continue
 			}
-			if function.Recv != nil && function.Name.Name == methodName && validTransportMethod(function.Type, imports, transport) {
+			if function.Recv != nil && function.Name.Name == methodName && validTransportMethod(function.Type, imports, transport, router) {
 				receiver, ok := referenceType(function.Recv.List[0].Type)
 				if !ok {
 					continue
@@ -341,13 +347,17 @@ func referenceType(expression ast.Expr) (typeReference, bool) {
 	}
 }
 
-func validTransportMethod(function *ast.FuncType, imports map[string]string, transport string) bool {
+func validTransportMethod(function *ast.FuncType, imports map[string]string, transport, router string) bool {
 	if fieldCount(function.Params) != 1 || fieldCount(function.Results) != 0 {
 		return false
 	}
 	parameter := function.Params.List[0].Type
-	wantImport := "github.com/charlesonunze/fw/transport/http"
+	wantImport := "github.com/go-chi/chi/v5"
 	wantType := "Router"
+	if router == routerGin {
+		wantImport = "github.com/gin-gonic/gin"
+		wantType = "IRouter"
+	}
 	if transport == "grpc" {
 		pointer, ok := parameter.(*ast.StarExpr)
 		if !ok {
@@ -388,6 +398,9 @@ func importAliases(file *ast.File) map[string]string {
 			continue
 		}
 		alias := filepath.Base(importPath)
+		if importPath == "github.com/go-chi/chi/v5" {
+			alias = "chi"
+		}
 		if spec.Name != nil {
 			alias = spec.Name.Name
 		}
@@ -605,7 +618,7 @@ func main() {
 	{{- else }}
 	router := gin.New()
 	{{- end }}
-	httpTransport := fwhttp.New(fwrouter.NewRouter(router), fwhttp.Config{
+	httpTransport := fwhttp.New(fwrouter.NewAdapter(router), fwhttp.Config{
 		Addr: "{{ .Port }}",
 	})
 	app := fw.New(fw.Config{
@@ -619,7 +632,7 @@ func main() {
 	{{- end }}
 	module := {{ .Name }}.New()
 	{{- if eq .Transport "http" }}
-	var _ fwhttp.Module = module
+	var _ fwrouter.Module = module
 	{{- else }}
 	var _ fwgrpc.Module = module
 	{{- end }}

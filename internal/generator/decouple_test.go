@@ -18,7 +18,7 @@ func TestDecoupleMainTemplateUsesSelectedTransport(t *testing.T) {
 		doNotWant string
 		assertion string
 	}{
-		{name: "http", transport: "http", want: "httpTransport := fwhttp.New(fwrouter.NewRouter(router), fwhttp.Config{", doNotWant: "fwgrpc", assertion: "var _ fwhttp.Module = module"},
+		{name: "http", transport: "http", want: "httpTransport := fwhttp.New(fwrouter.NewAdapter(router), fwhttp.Config{", doNotWant: "fwgrpc", assertion: "var _ fwrouter.Module = module"},
 		{name: "grpc", transport: "grpc", want: "grpcTransport := fwgrpc.New(fwgrpc.Config{", doNotWant: "fwrouter", assertion: "var _ fwgrpc.Module = module"},
 	}
 
@@ -130,7 +130,7 @@ func (m *Module) RegisterGRPC(string) {}
 		t.Run(tt.name, func(t *testing.T) {
 			t.Chdir(t.TempDir())
 			writeFixture(t, filepath.Join("internal", "modules", "user", "user_module.go"), tt.source)
-			got, err := moduleSupportsTransport("user", "grpc")
+			got, err := moduleSupportsTransport("user", "grpc", "")
 			if err != nil {
 				t.Fatalf("moduleSupportsTransport() error = %v", err)
 			}
@@ -163,7 +163,7 @@ func TestDecoupleModuleRejectsInvalidPortBeforeCreatingOutput(t *testing.T) {
 func TestDecoupleModuleRejectsTransportNotImplementedByModule(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
-	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{Router: routerChi}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 
@@ -262,7 +262,7 @@ const documentation = "example.com/app/internal/modules/order/pb"
 func TestDecoupleModuleRejectsOutputInsideSource(t *testing.T) {
 	t.Chdir(t.TempDir())
 	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
-	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{Router: routerChi}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 
@@ -280,7 +280,7 @@ func TestDecoupleModuleRollsBackFailedGeneration(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("PATH", t.TempDir())
 	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
-	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{Router: routerChi}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 
@@ -395,7 +395,7 @@ func TestDecoupledFlatModuleCompiles(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
-	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{Router: routerChi}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 
@@ -429,7 +429,7 @@ func TestDecoupledGRPCModuleNeedsNoRouterAdapter(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.2\n")
-	if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
+	if err := NewModule("user", "example.com/app", ModuleConfig{Transport: ModuleTransportNone}); err != nil {
 		t.Fatalf("NewModule() error = %v", err)
 	}
 	writeFixture(t, filepath.Join("internal", "modules", "user", "user_grpc.go"), `package user
