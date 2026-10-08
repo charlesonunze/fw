@@ -44,13 +44,19 @@ type Module interface {
 
 // Runner is implemented by modules and application services that own
 // background work. Run must block until ctx is cancelled or a fatal error
-// occurs. Returning before cancellation stops the whole application.
+// occurs, and must join all work it owns before returning. Returning before
+// cancellation stops the whole application. Release shared resources in Close,
+// not Run, so dependents can finish using them during shutdown.
 type Runner interface {
 	Run(ctx context.Context) error
 }
 
 // Stopper is implemented when cancellation alone is insufficient to quiesce
-// active work. Stop runs before dependencies are closed and must honor ctx.
+// active work. Stop runs before dependencies are stopped or closed and must
+// honor ctx. A non-nil error aborts remaining teardown because completion is
+// uncertain. If the component also implements Runner, fw waits for Run to return
+// before stopping its dependencies. Otherwise, Stop must return nil only after
+// all owned work has stopped.
 type Stopper interface {
 	Stop(ctx context.Context) error
 }
@@ -61,6 +67,7 @@ type Stopper interface {
 // Finalizers share a timeout within the overall shutdown budget. Close must
 // return promptly; it has no context and cannot be interrupted by fw.
 // Declared dependencies needed during finalization must also be Finalizers.
+// Finalize and Close are skipped when shutdown aborts with active or uncertain work.
 type Finalizer interface {
 	Finalize(ctx context.Context) error
 }

@@ -142,11 +142,19 @@ func (l *lifecycleLogger) Info(msg string, args ...any) {
 				l.recorder.add("log state closed")
 				return
 			}
+			if keyOK && valueOK && key == "to" && value == appStateAborted.String() {
+				l.recorder.add("log state aborted")
+				return
+			}
 		}
 	}
 }
 
-func (*lifecycleLogger) Error(string, ...any) {}
+func (l *lifecycleLogger) Error(msg string, _ ...any) {
+	if msg == "shutdown incomplete" {
+		l.recorder.add("log shutdown incomplete")
+	}
+}
 func (*lifecycleLogger) Debug(string, ...any) {}
 func (*lifecycleLogger) Warn(string, ...any)  {}
 func (l *lifecycleLogger) With(...any) Logger { return l }
@@ -415,15 +423,16 @@ type blockingStopModule struct {
 	releaseStop chan struct{}
 }
 
-type blockingStopService struct {
+type deadlineStopService struct {
 	managedService
 	stopStarted chan struct{}
 }
 
-func (s *blockingStopService) Stop(ctx context.Context) error {
+func (s *deadlineStopService) Stop(ctx context.Context) error {
 	close(s.stopStarted)
 	<-ctx.Done()
-	return ctx.Err()
+	// This fixture confirms cleanup completed exactly at the work deadline.
+	return nil
 }
 
 func (m *blockingStopModule) Stop(ctx context.Context) error {
@@ -436,20 +445,18 @@ func (m *blockingStopModule) Stop(ctx context.Context) error {
 	}
 }
 
-func TestLifecycleAggregatesStopAndCloseErrors(t *testing.T) {
+func TestLifecycleAggregatesRunnerAndCloseErrors(t *testing.T) {
 	runErr := errors.New("runner failed")
-	moduleStopErr := errors.New("module stop failed")
 	moduleCloseErr := errors.New("module close failed")
-	serviceStopErr := errors.New("service stop failed")
 	serviceCloseErr := errors.New("service close failed")
 	recorder := &eventRecorder{}
 	module := &managedModule{
 		name: "todo", recorder: recorder, runErr: runErr,
-		stopErr: moduleStopErr, closeErr: moduleCloseErr,
+		closeErr: moduleCloseErr,
 	}
 	service := &managedService{
 		name: "postgres", recorder: recorder,
-		stopErr: serviceStopErr, closeErr: serviceCloseErr,
+		closeErr: serviceCloseErr,
 	}
 	app := New(Config{Logger: discardLogger{}})
 	if err := app.RegisterService(service); err != nil {
@@ -458,10 +465,13 @@ func TestLifecycleAggregatesStopAndCloseErrors(t *testing.T) {
 	app.RegisterModules(module)
 
 	err := app.Start(context.Background())
-	for _, want := range []error{runErr, moduleStopErr, moduleCloseErr, serviceStopErr, serviceCloseErr} {
+	for _, want := range []error{runErr, moduleCloseErr, serviceCloseErr} {
 		if !errors.Is(err, want) {
 			t.Errorf("Start() error = %v, missing %v", err, want)
 		}
+	}
+	if errors.Is(err, ErrShutdownIncomplete) {
+		t.Fatalf("completed cleanup reported incomplete shutdown: %v", err)
 	}
 }
 
@@ -545,7 +555,7 @@ func TestFinalizerReceivesReservedShutdownContext(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				recorder := &eventRecorder{}
-				slowService := &blockingStopService{
+				slowService := &deadlineStopService{
 					managedService: managedService{name: "river", recorder: recorder},
 					stopStarted:    make(chan struct{}),
 				}
@@ -579,11 +589,11 @@ func TestFinalizerReceivesReservedShutdownContext(t *testing.T) {
 				}
 
 				startedAt := time.Now()
-				if err := app.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
-					t.Fatalf("Stop() error = %v, want shutdown deadline error", err)
+				if err := app.Stop(ctx); err != nil {
+					t.Fatalf("Stop() error = %v", err)
 				}
-				if err := <-startDone; !errors.Is(err, context.DeadlineExceeded) {
-					t.Fatalf("Start() error = %v, want shutdown deadline error", err)
+				if err := <-startDone; err != nil {
+					t.Fatalf("Start() error = %v", err)
 				}
 				if elapsed := time.Since(startedAt); elapsed != tt.wantWork {
 					t.Fatalf("shutdown work took %s, want %s", elapsed, tt.wantWork)
@@ -667,7 +677,7 @@ func TestFinalizationTimeoutCapsTerminalPhase(t *testing.T) {
 	}
 }
 
-func TestStartupFailureReservesFinalizationBudget(t *testing.T) {
+func TestStartupStopFailureSkipsFinalization(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		recorder := &eventRecorder{}
 		prepareErr := errors.New("listen failed")
@@ -693,19 +703,17 @@ func TestStartupFailureReservesFinalizationBudget(t *testing.T) {
 
 		startedAt := time.Now()
 		err := app.Start(t.Context())
-		if !errors.Is(err, prepareErr) || !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("Start() error = %v, want preparation and stop errors", err)
+		if !errors.Is(err, prepareErr) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrShutdownIncomplete) {
+			t.Fatalf("Start() error = %v, want preparation, stop and incomplete shutdown errors", err)
 		}
 		if elapsed := time.Since(startedAt); elapsed != 120*time.Millisecond {
 			t.Fatalf("startup cleanup took %s, want 120ms", elapsed)
 		}
-		if err := <-finalizer.finalizeCtxErr; err != nil {
-			t.Fatalf("Finalize() context error = %v, want active context", err)
+		for _, event := range recorder.snapshot() {
+			if strings.HasPrefix(event, "close ") || strings.HasPrefix(event, "finalize ") {
+				t.Errorf("unexpected cleanup after stop failure: %s", event)
+			}
 		}
-		if budget := <-finalizer.finalizeBudget; budget != 80*time.Millisecond {
-			t.Fatalf("Finalize() budget = %s, want 80ms", budget)
-		}
-		assertBefore(t, recorder.snapshot(), "close module todo", "finalize service observability")
 	})
 }
 

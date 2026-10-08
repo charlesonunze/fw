@@ -11,6 +11,10 @@ import (
 
 var errStopRequested = errors.New("fw: stop requested")
 
+// ErrShutdownIncomplete means fw could not confirm that all work stopped.
+// Remaining resources and finalizers are left open for process-level termination.
+var ErrShutdownIncomplete = errors.New("fw: shutdown incomplete")
+
 type appState uint8
 
 const (
@@ -19,6 +23,7 @@ const (
 	appStateRunning
 	appStateStopping
 	appStateClosed
+	appStateAborted
 )
 
 func (s appState) String() string {
@@ -33,6 +38,8 @@ func (s appState) String() string {
 		return "stopping"
 	case appStateClosed:
 		return "closed"
+	case appStateAborted:
+		return "aborted"
 	default:
 		return "unknown"
 	}
@@ -109,6 +116,9 @@ func (a *App) Start(ctx context.Context) error {
 // the shutdown deadline; later callers only control how long they wait. When
 // terminal Finalizers are registered, their configured reserve remains inside
 // that deadline rather than extending it.
+// If stopping fails or a runner remains active, shutdown aborts without closing
+// remaining resources. Subsequent Stop calls return the same shutdown result;
+// they do not retry cleanup. Callbacks must honor their contexts.
 func (a *App) Stop(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("fw: stop context is nil")
@@ -122,7 +132,7 @@ func (a *App) Stop(ctx context.Context) error {
 	case appStateNew:
 		a.lifecycleMu.Unlock()
 		return fmt.Errorf("fw: application has not been started")
-	case appStateClosed:
+	case appStateClosed, appStateAborted:
 		stopped := a.stopped
 		a.lifecycleMu.Unlock()
 		return a.waitForStopCompletion(ctx, stopped)
@@ -244,8 +254,13 @@ func (a *App) shutdownStartup(trigger shutdownTrigger, startupErr error, transpo
 
 	// Runners have not started yet. Prepared transports and modules whose Init
 	// was attempted still get a chance to release partial startup work.
-	stopErr := errors.Join(a.stopTransports(workCtx, transports), a.stopModules(workCtx))
-	return a.finish(ctx, errors.Join(startupErr, stopErr))
+	if err := a.stopTransports(workCtx, transports); err != nil {
+		return a.abortShutdown(errors.Join(startupErr, err))
+	}
+	if err := a.stopModules(workCtx, nil); err != nil {
+		return a.abortShutdown(errors.Join(startupErr, err))
+	}
+	return a.finish(ctx, startupErr)
 }
 
 func (a *App) shutdownRunning(trigger shutdownTrigger, transports []Transport, components *componentGroup) error {
@@ -258,28 +273,22 @@ func (a *App) shutdownRunning(trigger shutdownTrigger, transports []Transport, c
 	workCtx, cancelWork := a.shutdownWorkContext(ctx)
 	defer cancelWork()
 
-	transportDone := make(chan error, 1)
-	go func() {
-		transportDone <- a.stopTransports(workCtx, transports)
-	}()
-
 	a.cancelRuntime(trigger.cause)
-	moduleStopErr := a.stopModules(workCtx)
-	moduleRunErr := waitForComponents(workCtx, components.modulesDone, "module runners")
-	transportErr := <-transportDone
-	transportRunErr := waitForComponents(workCtx, components.transportsDone, "transports")
-	serviceStopErr := a.stopApplicationServices(workCtx)
-	serviceRunErr := waitForComponents(workCtx, components.servicesDone, "application service runners")
-
-	return a.finish(ctx, errors.Join(
-		components.failureError(),
-		moduleStopErr,
-		moduleRunErr,
-		transportErr,
-		transportRunErr,
-		serviceStopErr,
-		serviceRunErr,
-	))
+	// Stop consumers completely before stopping any of their dependencies.
+	err := a.stopTransports(workCtx, transports)
+	if err == nil {
+		err = waitForComponents(workCtx, components.transportsDone, "transports")
+	}
+	if err == nil {
+		err = a.stopModules(workCtx, components.moduleDone)
+	}
+	if err == nil {
+		err = a.stopApplicationServices(workCtx, components.serviceDone)
+	}
+	if err != nil {
+		return a.abortShutdown(errors.Join(components.failureError(), err))
+	}
+	return a.finish(ctx, components.failureError())
 }
 
 func (a *App) cancelRuntime(cause error) {
@@ -356,58 +365,77 @@ func (a *App) finish(ctx context.Context, shutdownErr error) error {
 	result = errors.Join(result, a.finalizeApplicationServices(finalizeCtx))
 	cancelFinalize()
 
+	a.completeShutdown(result)
+	return result
+}
+
+func (a *App) abortShutdown(err error) error {
+	err = errors.Join(ErrShutdownIncomplete, err)
+	a.logger.Error("shutdown incomplete", "error", err)
+	a.transition(appStateAborted)
+	a.completeShutdown(err)
+	return err
+}
+
+func (a *App) completeShutdown(err error) {
 	a.lifecycleMu.Lock()
-	a.shutdownErr = result
+	a.shutdownErr = err
 	a.stopContext = nil
 	a.runtimeCancel = nil
 	close(a.stopped)
 	a.lifecycleMu.Unlock()
-	return result
 }
 
-func (a *App) stopModules(ctx context.Context) error {
-	var stopErrors []error
+func (a *App) stopModules(ctx context.Context, runners map[ModuleName]<-chan struct{}) error {
 	for i := len(a.initializedModules) - 1; i >= 0; i-- {
 		module := a.initializedModules[i]
 		stopper, ok := module.(Stopper)
-		if !ok {
-			continue
+		if ok {
+			a.logger.Info("stopping module", "module", module.Name())
+			if err := stopper.Stop(ctx); err != nil {
+				return fmt.Errorf("fw: stop module %q: %w", module.Name(), err)
+			}
 		}
-		a.logger.Info("stopping module", "module", module.Name())
-		if err := stopper.Stop(ctx); err != nil {
-			a.logger.Error("module stop error", "module", module.Name(), "error", err)
-			stopErrors = append(stopErrors, fmt.Errorf("fw: stop module %q: %w", module.Name(), err))
+		if err := waitForComponents(ctx, runners[module.Name()], fmt.Sprintf("module runner %q", module.Name())); err != nil {
+			return err
 		}
 	}
-	return errors.Join(stopErrors...)
+	return nil
 }
 
-func (a *App) stopApplicationServices(ctx context.Context) error {
-	var stopErrors []error
+func (a *App) stopApplicationServices(ctx context.Context, runners map[string]<-chan struct{}) error {
 	for i := len(a.preRegistered) - 1; i >= 0; i-- {
 		service := a.preRegistered[i]
-		if _, ok := service.(Finalizer); ok {
-			continue
-		}
+		_, finalizer := service.(Finalizer)
 		stopper, ok := service.(Stopper)
-		if !ok {
-			continue
+		if ok && !finalizer {
+			a.logger.Info("stopping service", "service", service.Name())
+			if err := stopper.Stop(ctx); err != nil {
+				return fmt.Errorf("fw: stop application service %q: %w", service.Name(), err)
+			}
 		}
-		a.logger.Info("stopping service", "service", service.Name())
-		if err := stopper.Stop(ctx); err != nil {
-			a.logger.Error("service stop error", "service", service.Name(), "error", err)
-			stopErrors = append(stopErrors, fmt.Errorf("fw: stop application service %q: %w", service.Name(), err))
+		if err := waitForComponents(ctx, runners[service.Name()], fmt.Sprintf("application service runner %q", service.Name())); err != nil {
+			return err
 		}
 	}
-	return errors.Join(stopErrors...)
+	return nil
 }
 
 func waitForComponents(ctx context.Context, done <-chan struct{}, name string) error {
+	if done == nil {
+		return nil
+	}
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("fw: wait for %s: %w", name, ctx.Err())
+		// Completion remains valid when both channels are ready.
+		select {
+		case <-done:
+			return nil
+		default:
+			return fmt.Errorf("fw: wait for %s: %w", name, ctx.Err())
+		}
 	}
 }
 
@@ -429,11 +457,8 @@ type componentGroup struct {
 
 	mu             sync.Mutex
 	failureErrors  []error
-	moduleWG       sync.WaitGroup
-	serviceWG      sync.WaitGroup
-	transportWG    sync.WaitGroup
-	modulesDone    chan struct{}
-	servicesDone   chan struct{}
+	moduleDone     map[ModuleName]<-chan struct{}
+	serviceDone    map[string]<-chan struct{}
 	transportsDone chan struct{}
 }
 
@@ -443,8 +468,8 @@ func newComponentGroup(capacity int) *componentGroup {
 	}
 	return &componentGroup{
 		failures:       make(chan error, capacity),
-		modulesDone:    make(chan struct{}),
-		servicesDone:   make(chan struct{}),
+		moduleDone:     make(map[ModuleName]<-chan struct{}),
+		serviceDone:    make(map[string]<-chan struct{}),
 		transportsDone: make(chan struct{}),
 	}
 }
@@ -452,11 +477,12 @@ func newComponentGroup(capacity int) *componentGroup {
 func (a *App) startComponents(ctx context.Context, transports []Transport) *componentGroup {
 	components := newComponentGroup(len(a.registeredModules) + len(a.preRegistered) + len(transports))
 
+	var transportWG sync.WaitGroup
 	for _, transport := range transports {
 		transport := transport
-		components.transportWG.Add(1)
+		transportWG.Add(1)
 		go func() {
-			defer components.transportWG.Done()
+			defer transportWG.Done()
 			a.logger.Info("starting transport", "transport", transport.Name())
 			err := transport.Run(ctx)
 			components.recordTransportResult(ctx, transport.Name(), err)
@@ -468,35 +494,31 @@ func (a *App) startComponents(ctx context.Context, transports []Transport) *comp
 		if !ok {
 			continue
 		}
-		components.startRunner(ctx, "module", string(module.Name()), runner, &components.moduleWG)
+		components.moduleDone[module.Name()] = components.startRunner(ctx, "module", string(module.Name()), runner)
 	}
 	for _, service := range a.preRegistered {
 		runner, ok := service.(Runner)
 		if !ok {
 			continue
 		}
-		components.startRunner(ctx, "application service", service.Name(), runner, &components.serviceWG)
+		components.serviceDone[service.Name()] = components.startRunner(ctx, "application service", service.Name(), runner)
 	}
 
-	go func() {
-		components.moduleWG.Wait()
-		close(components.modulesDone)
-	}()
-	go func() {
-		components.serviceWG.Wait()
-		close(components.servicesDone)
-	}()
-	go func() {
-		components.transportWG.Wait()
+	if len(transports) == 0 {
 		close(components.transportsDone)
-	}()
+	} else {
+		go func() {
+			transportWG.Wait()
+			close(components.transportsDone)
+		}()
+	}
 	return components
 }
 
-func (g *componentGroup) startRunner(ctx context.Context, kind, name string, runner Runner, wg *sync.WaitGroup) {
-	wg.Add(1)
+func (g *componentGroup) startRunner(ctx context.Context, kind, name string, runner Runner) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
-		defer wg.Done()
+		defer close(done)
 		err := runner.Run(ctx)
 		if context.Cause(ctx) != nil && (err == nil || cancellationError(ctx, err)) {
 			return
@@ -506,6 +528,7 @@ func (g *componentGroup) startRunner(ctx context.Context, kind, name string, run
 		}
 		g.recordFailure(fmt.Errorf("fw: %s runner %q: %w", kind, name, err))
 	}()
+	return done
 }
 
 func (g *componentGroup) recordTransportResult(ctx context.Context, name string, err error) {
