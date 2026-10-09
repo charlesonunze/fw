@@ -365,8 +365,7 @@ func TestWriteGoModDoesNotPinUnreleasedFrameworkVersion(t *testing.T) {
 }
 
 func TestExtractMethodsExcludesServiceLifecycle(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "user_service.go")
-	writeFixture(t, path, `package user
+	const source = `package user
 
 type Service struct{}
 
@@ -375,15 +374,21 @@ func (s *Service) Health(context.Context) error { return nil }
 func (s *Service) Close() error { return nil }
 func (s *Service) GetByID() {}
 func (s *Service) create() {}
-`)
+`
 
-	got, err := extractMethods(path)
-	if err != nil {
-		t.Fatalf("extractMethods() error = %v", err)
-	}
-	want := []string{"GetByID"}
-	if !slices.Equal(got, want) {
-		t.Errorf("extractMethods() = %v, want %v", got, want)
+	for _, receiver := range []string{"service", "Service", "UserService"} {
+		t.Run(receiver, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "user_service.go")
+			writeFixture(t, path, strings.ReplaceAll(source, "Service", receiver))
+			got, err := extractMethods(path)
+			if err != nil {
+				t.Fatalf("extractMethods() error = %v", err)
+			}
+			want := []string{"GetByID"}
+			if !slices.Equal(got, want) {
+				t.Errorf("extractMethods() = %v, want %v", got, want)
+			}
+		})
 	}
 }
 
@@ -438,6 +443,7 @@ import "google.golang.org/grpc"
 
 func (m *Module) RegisterGRPC(*grpc.Server) {}
 `)
+	writeDecoupleAssetFixture(t)
 
 	output := filepath.Join("microservices", "user-grpc")
 	if err := DecoupleModule(
