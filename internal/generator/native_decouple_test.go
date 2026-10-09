@@ -22,6 +22,7 @@ func TestNativeHTTPDecoupling(t *testing.T) {
 			if err := NewModule("user", "example.com/app", ModuleConfig{}); err != nil {
 				t.Fatal(err)
 			}
+			writeDecoupleAssetFixture(t)
 			output := filepath.Join("microservices", "user")
 			if err := DecoupleModule("user", "example.com/app", output, ":8081", "http", "", frameworkRoot(t)); err != nil {
 				t.Fatal(err)

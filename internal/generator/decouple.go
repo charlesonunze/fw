@@ -104,7 +104,10 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 		return fmt.Errorf("failed to detect dependencies: %w", err)
 	}
 
-	goVersion := detectGoVersion()
+	goVersion, err := detectGoVersion()
+	if err != nil {
+		return err
+	}
 	data := decoupleData{
 		Name:        name,
 		Pascal:      pascal(name),
@@ -260,21 +263,23 @@ func moduleSupportsTransport(name, transport, router string) (bool, error) {
 	}
 
 	dir := filepath.Join("internal", "modules", name)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
 	var moduleType typeReference
 	supportedReceivers := make(map[string]methodSet)
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
 		}
-		if info.Mode()&os.ModeSymlink != 0 && strings.HasSuffix(path, ".go") {
-			return fmt.Errorf("refuse to inspect symlinked Go file %s", path)
-		}
-		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
+		path := filepath.Join(dir, entry.Name())
+		if !entry.Type().IsRegular() {
+			return false, fmt.Errorf("refuse to inspect non-regular Go file %s", path)
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		if err != nil {
-			return fmt.Errorf("parse %s: %w", path, err)
+			return false, fmt.Errorf("parse %s: %w", path, err)
 		}
 		imports := importAliases(file)
 		for _, declaration := range file.Decls {
@@ -300,10 +305,9 @@ func moduleSupportsTransport(name, transport, router string) (bool, error) {
 				supportedReceivers[receiver.name] = methods
 			}
 		}
-		return nil
-	})
-	if err != nil || moduleType.name == "" {
-		return false, err
+	}
+	if moduleType.name == "" {
+		return false, nil
 	}
 	methods := supportedReceivers[moduleType.name]
 	if moduleType.pointerDepth == 1 {
@@ -421,11 +425,11 @@ func detectDeps(name, modPath string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 && strings.HasSuffix(path, ".go") {
-			return fmt.Errorf("refuse to inspect symlinked Go file %s", path)
-		}
 		if info.IsDir() || !strings.HasSuffix(path, ".go") {
 			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refuse to inspect non-regular Go file %s", path)
 		}
 
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
@@ -477,7 +481,7 @@ func extractMethods(path string) ([]string, error) {
 			continue
 		}
 		receiver := receiverName(fn.Recv.List[0].Type)
-		if receiver == "Service" || strings.HasSuffix(receiver, "Service") {
+		if receiver == "service" || strings.HasSuffix(receiver, "Service") {
 			methods = append(methods, fn.Name.Name)
 		}
 	}
@@ -494,16 +498,22 @@ func receiverName(expr ast.Expr) string {
 }
 
 // detectGoVersion reads the go version from the current project's go.mod.
-func detectGoVersion() string {
+func detectGoVersion() (string, error) {
 	data, err := os.ReadFile("go.mod")
 	if err != nil {
-		return "1.21"
+		return "", fmt.Errorf("read go.mod: %w", err)
 	}
-	file, err := modfile.ParseLax("go.mod", data, nil)
-	if err != nil || file.Go == nil || !version.IsValid("go"+file.Go.Version) {
-		return "1.21"
+	file, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		return "", fmt.Errorf("parse go.mod: %w", err)
 	}
-	return file.Go.Version
+	if file.Go == nil {
+		return "", fmt.Errorf("go directive not found in go.mod")
+	}
+	if !version.IsValid("go" + file.Go.Version) {
+		return "", fmt.Errorf("invalid Go version %q in go.mod", file.Go.Version)
+	}
+	return file.Go.Version, nil
 }
 
 // writeGoMod writes a minimal go.mod for the new standalone project.
@@ -524,11 +534,11 @@ func restructureModule(name, modPath, moduleName, output string) error {
 		if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 && strings.HasSuffix(path, ".go") {
-			return fmt.Errorf("refuse to copy symlinked Go file %s", path)
-		}
-		if info.IsDir() || !strings.HasSuffix(path, ".go") {
+		if info.IsDir() {
 			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refuse to copy non-regular file %s", path)
 		}
 
 		rel, err := filepath.Rel(srcBase, path)
@@ -543,11 +553,13 @@ func restructureModule(name, modPath, moduleName, output string) error {
 			return err
 		}
 
-		rewritten, err := rewriteModuleImports(path, content, oldImportRoot, newImportRoot)
-		if err != nil {
-			return err
+		if strings.HasSuffix(path, ".go") {
+			content, err = rewriteModuleImports(path, content, oldImportRoot, newImportRoot)
+			if err != nil {
+				return err
+			}
 		}
-		return writeFileExclusive(dst, rewritten, 0o644)
+		return writeFileExclusive(dst, content, info.Mode().Perm())
 	})
 }
 
