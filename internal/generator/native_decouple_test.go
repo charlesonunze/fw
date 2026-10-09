@@ -15,7 +15,7 @@ func TestNativeHTTPDecoupling(t *testing.T) {
 	for _, router := range []string{routerChi, routerGin} {
 		t.Run(router, func(t *testing.T) {
 			t.Chdir(t.TempDir())
-			writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.25.13\n")
+			writeFixture(t, "go.mod", "module example.com/app\n\ngo 1.26.9\n")
 			if err := writeRouterMetadata(".", router); err != nil {
 				t.Fatal(err)
 			}
