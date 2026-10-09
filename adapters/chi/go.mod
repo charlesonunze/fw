@@ -1,6 +1,6 @@
 module github.com/charlesonunze/fw/adapters/chi
 
-go 1.25.13
+go 1.26.9
 
 require (
 	github.com/charlesonunze/fw v0.5.0

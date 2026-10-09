@@ -85,6 +85,10 @@ func DependsOn[T any]() RegistrationOption {
 // when its health changes. An unhealthy optional service degrades application
 // health without making the application unready.
 //
+// Optional checks run after required checks and share at most one second, capped
+// at half the remaining health-check deadline. Checks must honor cancellation.
+// Checks that time out or cannot start before that deadline are reported unhealthy.
+//
 // OptionalReadiness only affects health aggregation. Registration, startup,
 // Runner failures, shutdown, and dependency resolution remain required.
 // OptionalReadiness is only valid with App.RegisterService.

@@ -6,7 +6,10 @@ import (
 	"time"
 )
 
-const healthCheckTimeout = 5 * time.Second
+const (
+	healthCheckTimeout         = 5 * time.Second
+	optionalHealthCheckTimeout = time.Second
+)
 
 type componentHealthState struct {
 	errorMessage string
@@ -48,7 +51,7 @@ func (a *App) evaluateHealth(ctx context.Context) HealthReport {
 	}
 	for _, module := range a.modules {
 		name := string(module.Name())
-		err := module.Health(ctx)
+		err := checkHealth(ctx, module.Health)
 		healthy := err == nil
 		report.Modules[name] = healthy
 		if !healthy {
@@ -58,19 +61,48 @@ func (a *App) evaluateHealth(ctx context.Context) HealthReport {
 	}
 	for _, service := range a.preRegistered {
 		name := service.Name()
-		err := service.Health(ctx)
+		if _, optional := a.optionalReadiness[name]; optional {
+			continue
+		}
+		err := checkHealth(ctx, service.Health)
 		healthy := err == nil
 		report.Services[name] = healthy
 		if !healthy {
-			if _, optional := a.optionalReadiness[name]; optional {
-				report.Degraded = true
-			} else {
-				report.Healthy = false
-			}
+			report.Healthy = false
+		}
+		a.health.record(a.logger, "service", name, err)
+	}
+	if len(a.optionalReadiness) == 0 {
+		return report
+	}
+
+	// Optional checks share a budget and leave time to deliver the readiness result.
+	deadline, _ := ctx.Deadline()
+	optionalCtx, cancelOptional := context.WithTimeout(ctx, min(optionalHealthCheckTimeout, time.Until(deadline)/2))
+	defer cancelOptional()
+	for _, service := range a.preRegistered {
+		name := service.Name()
+		if _, optional := a.optionalReadiness[name]; !optional {
+			continue
+		}
+		err := checkHealth(optionalCtx, service.Health)
+		report.Services[name] = err == nil
+		if err != nil {
+			report.Degraded = true
 		}
 		a.health.record(a.logger, "service", name, err)
 	}
 	return report
+}
+
+func checkHealth(ctx context.Context, check func(context.Context) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := check(ctx); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func (e *healthEvaluator) record(logger Logger, kind, name string, healthErr error) {
