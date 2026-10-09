@@ -31,9 +31,9 @@ type Module interface {
 
 	// Health reports whether the module is healthy. fw aggregates results for
 	// the configured HTTP readiness and gRPC health services.
-	// Return nil if healthy, or an error describing the problem if not. Errors
-	// are logged on health transitions but are not exposed by built-in health
-	// endpoints, so they must not contain secrets.
+	// It must honor context cancellation. Return nil if healthy, or an error
+	// describing the problem if not. Errors are logged on health transitions but
+	// are not exposed by built-in health endpoints, so they must not contain secrets.
 	Health(ctx context.Context) error
 
 	// Close gracefully shuts down the module and releases resources. It must be
