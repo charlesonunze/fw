@@ -65,7 +65,7 @@ func New() Service {
 	return &service{}
 }
 
-// Name returns the service registry key.
+// Name returns the service's operational identity.
 func (*service) Name() string { return "{{ .Name }}" }
 
 // Health reports whether the service is ready.

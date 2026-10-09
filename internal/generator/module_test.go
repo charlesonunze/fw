@@ -84,6 +84,7 @@ func TestNewModuleCreatesFlatPrefixedPackage(t *testing.T) {
 		"type Service interface",
 		"fw.Service",
 		"type service struct",
+		"// Name returns the service's operational identity.",
 		"func NewService(repo Repository) *service",
 		"var _ Service = (*service)(nil)",
 	} {
