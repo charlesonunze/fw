@@ -34,6 +34,7 @@ func TestNewServiceCreatesPrefixedApplicationService(t *testing.T) {
 		"type Service interface",
 		"fw.Service",
 		"type service struct",
+		"// Name returns the service's operational identity.",
 		"func New() Service",
 		`func (*service) Name() string { return "mailer" }`,
 		"func (*service) Health(context.Context) error",

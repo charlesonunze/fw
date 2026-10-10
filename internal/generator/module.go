@@ -138,7 +138,13 @@ type {{ .Pascal }} struct {
 
 var moduleRepositoryTmpl = `package {{ .Name }}
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrNotFound indicates that the requested {{ .Name }} does not exist.
+var ErrNotFound = errors.New("{{ .Name }} not found")
 
 // Repository defines the persistence required by Service.
 type Repository interface {
@@ -171,7 +177,7 @@ func NewService(repo Repository) *service {
 	return &service{repo: repo}
 }
 
-// Name returns the service registry key.
+// Name returns the service's operational identity.
 func (*service) Name() string { return "{{ .Name }}.service" }
 
 // Health reports whether the service is ready.
@@ -205,13 +211,13 @@ import (
 // MemoryRepository stores {{ .Name }} records in memory.
 type MemoryRepository struct {
 	mu    sync.RWMutex
-	items map[string]*{{ .Pascal }}
+	items map[string]{{ .Pascal }}
 }
 
 // NewMemoryRepository creates an empty in-memory repository.
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
-		items: make(map[string]*{{ .Pascal }}),
+		items: make(map[string]{{ .Pascal }}),
 	}
 }
 
@@ -220,7 +226,7 @@ func (r *MemoryRepository) Create(_ context.Context, entity *{{ .Pascal }}) erro
 	defer r.mu.Unlock()
 
 	entity.ID = generateID()
-	r.items[entity.ID] = entity
+	r.items[entity.ID] = *entity
 	return nil
 }
 
@@ -230,9 +236,9 @@ func (r *MemoryRepository) FindByID(_ context.Context, id string) (*{{ .Pascal }
 
 	entity, ok := r.items[id]
 	if !ok {
-		return nil, fmt.Errorf("{{ .Name }} %q not found", id)
+		return nil, ErrNotFound
 	}
-	return entity, nil
+	return &entity, nil
 }
 
 func generateID() string {
@@ -246,6 +252,7 @@ var moduleHTTPTmpl = `package {{ .Name }}
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -264,8 +271,12 @@ func NewHTTPHandler(service Service) *HTTPHandler {
 // GetByID handles GET /{{ .Name }}s/{id}.
 func (h *HTTPHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	entity, err := h.service.GetByID(r.Context(), chi.URLParam(r, "id"))
-	if err != nil {
+	if errors.Is(err, ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "{{ .Name }} not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 		return
 	}
 
@@ -282,6 +293,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 var moduleGinHTTPTmpl = `package {{ .Name }}
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -300,8 +312,12 @@ func NewHTTPHandler(service Service) *HTTPHandler {
 // GetByID handles GET /{{ .Name }}s/:id.
 func (h *HTTPHandler) GetByID(c *gin.Context) {
 	entity, err := h.service.GetByID(c.Request.Context(), c.Param("id"))
-	if err != nil {
+	if errors.Is(err, ErrNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "{{ .Name }} not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return
 	}
 	c.JSON(http.StatusOK, entity)
@@ -312,6 +328,7 @@ var moduleGRPCTmpl = `package {{ .Name }}
 
 import (
 	"context"
+	"errors"
 
 	{{ .Name }}pb "{{ .ModulePath }}/internal/modules/{{ .Name }}/pb"
 	"google.golang.org/grpc"
@@ -336,8 +353,15 @@ func (h *GRPCHandler) Get{{ .Pascal }}(
 	request *{{ .Name }}pb.Get{{ .Pascal }}Request,
 ) (*{{ .Name }}pb.Get{{ .Pascal }}Response, error) {
 	entity, err := h.service.GetByID(ctx, request.GetId())
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrNotFound):
 		return nil, status.Error(codes.NotFound, "{{ .Name }} not found")
+	case errors.Is(err, context.Canceled):
+		return nil, status.Error(codes.Canceled, context.Canceled.Error())
+	case errors.Is(err, context.DeadlineExceeded):
+		return nil, status.Error(codes.DeadlineExceeded, context.DeadlineExceeded.Error())
+	case err != nil:
+		return nil, status.Error(codes.Internal, "internal server error")
 	}
 	return &{{ .Name }}pb.Get{{ .Pascal }}Response{Id: entity.ID}, nil
 }
