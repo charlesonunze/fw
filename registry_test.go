@@ -2,7 +2,9 @@ package fw
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -162,6 +164,122 @@ func TestServiceRegistryReportsAmbiguousConcreteType(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("GetService() error = %v, want ambiguity error", err)
 	}
+}
+
+func TestServiceRegistryZeroValue(t *testing.T) {
+	var registry ServiceRegistry
+	want := &registryService{name: "rabbitmq"}
+	if err := registry.Register(want, As[registryPublisher]()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetService[*registryService](&registry)
+	if err != nil || got != want {
+		t.Fatalf("GetService() = %v, %v; want %v", got, err, want)
+	}
+	gotInterface, err := GetService[registryPublisher](registry.forModule("user", nil))
+	if err != nil || gotInterface != want {
+		t.Fatalf("scoped GetService() = %v, %v; want %v", gotInterface, err, want)
+	}
+}
+
+func TestGetServiceMissingRegistryOrType(t *testing.T) {
+	tests := []struct {
+		name     string
+		registry *ServiceRegistry
+		wantErr  string
+	}{
+		{name: "nil registry", wantErr: "registry is nil"},
+		{name: "zero value", registry: &ServiceRegistry{}, wantErr: "is not registered"},
+		{name: "empty registry", registry: NewServiceRegistry(), wantErr: "is not registered"},
+		{name: "empty scope", registry: NewServiceRegistry().forModule("user", nil), wantErr: "is not registered"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GetService[*registryService](tt.registry)
+			if got != nil || err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("GetService() = %v, %v; want nil and %q", got, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestGetServiceFiltersConcreteProviders(t *testing.T) {
+	registry := NewServiceRegistry()
+	services := []*registryService{
+		{name: "hidden_first"}, {name: "user"}, {name: "auth"}, {name: "hidden_last"},
+	}
+	for _, service := range services {
+		if err := registry.forModule(ModuleName(service.name), nil).Register(service); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name     string
+		registry *ServiceRegistry
+		want     *registryService
+		wantErr  string
+	}{
+		{name: "owner", registry: registry.forModule("user", nil), want: services[1]},
+		{name: "direct import", registry: registry.forModule("todo", []ModuleName{"user"}), want: services[1]},
+		{name: "last provider", registry: registry.forModule("todo", []ModuleName{"hidden_last"}), want: services[3]},
+		{name: "no import", registry: registry.forModule("todo", nil), wantErr: "cannot access provider type"},
+		{
+			name:     "multiple imports",
+			registry: registry.forModule("todo", []ModuleName{"auth", "user"}),
+			wantErr:  "ambiguous across services user, auth;",
+		},
+		{
+			name:     "owner and import",
+			registry: registry.forModule("user", []ModuleName{"auth"}),
+			wantErr:  "ambiguous across services user, auth;",
+		},
+		{
+			name:     "unscoped",
+			registry: registry,
+			wantErr:  "ambiguous across services hidden_first, user, auth, hidden_last;",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GetService[*registryService](tt.registry)
+			if got != tt.want {
+				t.Fatalf("GetService() = %v, want %v", got, tt.want)
+			}
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("GetService() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestServiceRegistryConcurrentRegistrationAndLookup(t *testing.T) {
+	var registry ServiceRegistry
+	var workers sync.WaitGroup
+	start := make(chan struct{})
+	for i := range 16 {
+		workers.Go(func() {
+			<-start
+			want := &registryService{name: fmt.Sprintf("service%d", i)}
+			scope := registry.forModule(ModuleName(want.name), nil)
+			if err := scope.Register(want); err != nil {
+				t.Error(err)
+				return
+			}
+			for range 100 {
+				got, err := GetService[*registryService](scope)
+				if err != nil || got != want {
+					t.Errorf("GetService() = %v, %v; want %v", got, err, want)
+					return
+				}
+			}
+		})
+	}
+	close(start)
+	workers.Wait()
 }
 
 func TestAppRegisterServiceReturnsErrorsImmediately(t *testing.T) {

@@ -479,7 +479,6 @@ func (a *App) startComponents(ctx context.Context, transports []Transport) *comp
 
 	var transportWG sync.WaitGroup
 	for _, transport := range transports {
-		transport := transport
 		transportWG.Add(1)
 		go func() {
 			defer transportWG.Done()
@@ -567,7 +566,6 @@ func (a *App) stopTransports(ctx context.Context, transports []Transport) error 
 	var stops sync.WaitGroup
 	stops.Add(len(transports))
 	for _, transport := range transports {
-		transport := transport
 		go func() {
 			defer stops.Done()
 			a.logger.Info("stopping transport", "transport", transport.Name())

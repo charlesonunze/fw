@@ -219,7 +219,6 @@ func (r *ServiceRegistry) register(svc Service, registration serviceRegistration
 	state := r.sharedState()
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	state.ensureMaps()
 
 	if _, exists := state.services[name]; exists {
 		return fmt.Errorf("service %q already registered", name)
@@ -265,15 +264,6 @@ func (r *ServiceRegistry) canAccess(owner ModuleName) bool {
 	return allowed
 }
 
-func (s *serviceRegistryState) ensureMaps() {
-	if s.services == nil {
-		s.services = make(map[string]Service)
-	}
-	if s.providers == nil {
-		s.providers = make(map[reflect.Type][]serviceProvider)
-	}
-}
-
 func isNilService(svc Service) bool {
 	if svc == nil {
 		return true
@@ -299,13 +289,15 @@ func GetService[T any](reg *ServiceRegistry) (T, error) {
 	state := reg.sharedState()
 	state.mu.RLock()
 	registered := state.providers[target]
-	providers := make([]serviceProvider, 0, len(registered))
+	var service Service
+	matches := 0
 	for _, provider := range registered {
 		if reg.canAccess(provider.owner) {
-			providers = append(providers, provider)
+			service = provider.service
+			matches++
 		}
 	}
-	switch len(providers) {
+	switch matches {
 	case 0:
 		state.mu.RUnlock()
 		if len(registered) > 0 && reg.scope != nil {
@@ -313,7 +305,6 @@ func GetService[T any](reg *ServiceRegistry) (T, error) {
 		}
 		return zero, fmt.Errorf("fw: provider type %v is not registered", target)
 	case 1:
-		service := providers[0].service
 		state.mu.RUnlock()
 		provider, ok := any(service).(T)
 		if !ok {
@@ -321,9 +312,11 @@ func GetService[T any](reg *ServiceRegistry) (T, error) {
 		}
 		return provider, nil
 	default:
-		names := make([]string, 0, len(providers))
-		for _, provider := range providers {
-			names = append(names, provider.name)
+		names := make([]string, 0, matches)
+		for _, provider := range registered {
+			if reg.canAccess(provider.owner) {
+				names = append(names, provider.name)
+			}
 		}
 		state.mu.RUnlock()
 		return zero, fmt.Errorf(
