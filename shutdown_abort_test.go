@@ -105,7 +105,9 @@ func TestShutdownAbortsUnfinishedWork(t *testing.T) {
 					t.Errorf("aborted app state = %s, ready = %t", app.state, app.ready.Load())
 				}
 				assertNoShutdownCleanup(t, recorder.snapshot())
-				assertContains(t, recorder.snapshot(), "log shutdown incomplete")
+				if eventIndex(recorder.snapshot(), "log shutdown incomplete") >= 0 {
+					t.Error("incomplete shutdown error was logged instead of left for the caller")
+				}
 				assertContains(t, recorder.snapshot(), "log state aborted")
 				if eventIndex(recorder.snapshot(), "stop service postgres") >= 0 {
 					t.Error("stopped a dependency while its consumer was still running")
@@ -235,8 +237,9 @@ func TestStartupTransportStopFailureAbortsCleanup(t *testing.T) {
 	prepareErr := errors.New("prepare failed")
 	stopErr := errors.New("stop failed")
 	recorder := &eventRecorder{}
+	logger := &healthTestLogger{}
 	app := New(Config{
-		Logger: discardLogger{},
+		Logger: logger,
 		Transports: []Transport{
 			&controlledTransport{managedTransport: managedTransport{name: "http"}, stopErr: stopErr},
 			&managedTransport{name: "grpc", prepareErr: prepareErr},
@@ -254,6 +257,10 @@ func TestStartupTransportStopFailureAbortsCleanup(t *testing.T) {
 	if eventIndex(recorder.snapshot(), "stop module todo") >= 0 {
 		t.Error("stopped module after transport stop failed")
 	}
+	if stopResult := app.Stop(t.Context()); stopResult != err {
+		t.Errorf("Stop() error = %v, want the original result %v", stopResult, err)
+	}
+	assertNoErrorLogs(t, logger)
 }
 
 func TestWaitForComponentsAcceptsCompletedWorkAfterDeadline(t *testing.T) {

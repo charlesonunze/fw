@@ -219,7 +219,6 @@ func (a *App) closeResources() error {
 			}
 			a.logger.Info("closing service", "service", svc.Name())
 			if err := svc.Close(); err != nil {
-				a.logger.Error("service close error", "service", svc.Name(), "error", err)
 				closeErrors = append(closeErrors, fmt.Errorf("fw: close application service %q: %w", svc.Name(), err))
 			}
 		}
@@ -263,7 +262,6 @@ func (a *App) finalizeApplicationServices(ctx context.Context) error {
 func (a *App) closeModule(mod Module) error {
 	a.logger.Info("closing module", "module", mod.Name())
 	if err := mod.Close(); err != nil {
-		a.logger.Error("module close error", "module", mod.Name(), "error", err)
 		return fmt.Errorf("fw: close module %q: %w", mod.Name(), err)
 	}
 	return nil
