@@ -66,7 +66,8 @@ func TestStartClosesResourcesAfterModuleInitFailure(t *testing.T) {
 	}
 	pending := &lifecycleModule{name: "user", imports: []ModuleName{"auth"}, events: &events}
 
-	app := New(Config{Logger: discardLogger{}})
+	logger := &healthTestLogger{}
+	app := New(Config{Logger: logger})
 	if err := app.RegisterService(&lifecycleService{name: "postgres", events: &events}); err != nil {
 		t.Fatalf("RegisterService(postgres) error = %v", err)
 	}
@@ -94,6 +95,7 @@ func TestStartClosesResourcesAfterModuleInitFailure(t *testing.T) {
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("lifecycle events = %v, want %v", events, want)
 	}
+	assertNoErrorLogs(t, logger)
 }
 
 func TestStartClosesResourcesAfterModuleRegistrationFailure(t *testing.T) {

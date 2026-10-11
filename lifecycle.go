@@ -49,6 +49,10 @@ func (s appState) String() string {
 // components, and blocks until ctx is cancelled, Stop is called, or a component
 // fails. With no transports configured, Start runs a worker-only application.
 // An App can be started only once.
+//
+// The caller reports returned errors; fw logs lifecycle events and operational
+// warnings, not the terminal result. Use stderr or a logger that outlives the app:
+// managed logging services may already be closed when Start returns.
 func (a *App) Start(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("fw: start context is nil")
@@ -119,6 +123,8 @@ func (a *App) Start(ctx context.Context) error {
 // If stopping fails or a runner remains active, shutdown aborts without closing
 // remaining resources. Subsequent Stop calls return the same shutdown result;
 // they do not retry cleanup. Callbacks must honor their contexts.
+// When Stop observes completed shutdown, it returns the same result as Start.
+// Report that shared result from one caller, not both.
 func (a *App) Stop(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("fw: stop context is nil")
@@ -371,7 +377,6 @@ func (a *App) finish(ctx context.Context, shutdownErr error) error {
 
 func (a *App) abortShutdown(err error) error {
 	err = errors.Join(ErrShutdownIncomplete, err)
-	a.logger.Error("shutdown incomplete", "error", err)
 	a.transition(appStateAborted)
 	a.completeShutdown(err)
 	return err

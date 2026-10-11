@@ -458,7 +458,8 @@ func TestLifecycleAggregatesRunnerAndCloseErrors(t *testing.T) {
 		name: "postgres", recorder: recorder,
 		closeErr: serviceCloseErr,
 	}
-	app := New(Config{Logger: discardLogger{}})
+	logger := &healthTestLogger{}
+	app := New(Config{Logger: logger})
 	if err := app.RegisterService(service); err != nil {
 		t.Fatalf("RegisterService() error = %v", err)
 	}
@@ -473,6 +474,12 @@ func TestLifecycleAggregatesRunnerAndCloseErrors(t *testing.T) {
 	if errors.Is(err, ErrShutdownIncomplete) {
 		t.Fatalf("completed cleanup reported incomplete shutdown: %v", err)
 	}
+	for range 2 {
+		if stopErr := app.Stop(t.Context()); stopErr != err {
+			t.Errorf("Stop() error = %v, want the original result %v", stopErr, err)
+		}
+	}
+	assertNoErrorLogs(t, logger)
 }
 
 func TestFinalizerRunsAfterLifecycleLogsAndBlocksStop(t *testing.T) {
@@ -760,7 +767,8 @@ func TestFinalizerErrorsAreAggregated(t *testing.T) {
 		finalizeErr:    finalizeErr,
 		finalizeCtxErr: make(chan error, 1),
 	}
-	app := New(Config{Logger: discardLogger{}})
+	logger := &healthTestLogger{}
+	app := New(Config{Logger: logger})
 	if err := app.RegisterService(service); err != nil {
 		t.Fatalf("RegisterService() error = %v", err)
 	}
@@ -776,6 +784,10 @@ func TestFinalizerErrorsAreAggregated(t *testing.T) {
 	if err := <-service.finalizeCtxErr; err != nil {
 		t.Fatalf("Finalize() context error = %v, want fresh shutdown context after startup cancellation", err)
 	}
+	if stopErr := app.Stop(t.Context()); stopErr != err {
+		t.Errorf("Stop() error = %v, want the original result %v", stopErr, err)
+	}
+	assertNoErrorLogs(t, logger)
 }
 
 func TestLifecycleLogsStateTransitions(t *testing.T) {
@@ -846,6 +858,15 @@ func waitForAppState(t *testing.T, app *App, want appState) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("application did not reach %s state", want)
+}
+
+func assertNoErrorLogs(t *testing.T, logger *healthTestLogger) {
+	t.Helper()
+	for _, entry := range logger.snapshot() {
+		if entry.level == "error" {
+			t.Errorf("terminal error logged by fw: %s %v", entry.msg, entry.args)
+		}
+	}
 }
 
 func assertContains(t *testing.T, events []string, want string) {
