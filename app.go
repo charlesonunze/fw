@@ -126,7 +126,7 @@ func (a *App) RegisterModules(modules ...Module) {
 
 func (a *App) ensureLogger() {
 	if a.logger == nil {
-		a.logger = newDefaultLogger("info")
+		a.logger = newDefaultLogger()
 	}
 }
 

@@ -3,7 +3,6 @@ package fw
 import (
 	"log/slog"
 	"os"
-	"strings"
 )
 
 // Logger is the logging interface fw passes to modules.
@@ -21,19 +20,8 @@ type slogLogger struct {
 	l *slog.Logger
 }
 
-func newDefaultLogger(level string) Logger {
-	var lvl slog.Level
-	switch strings.ToLower(level) {
-	case "debug":
-		lvl = slog.LevelDebug
-	case "warn":
-		lvl = slog.LevelWarn
-	case "error":
-		lvl = slog.LevelError
-	default:
-		lvl = slog.LevelInfo
-	}
-	l := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl}))
+func newDefaultLogger() Logger {
+	l := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	return &slogLogger{l: l}
 }
 
