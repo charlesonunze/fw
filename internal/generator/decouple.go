@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/version"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -193,8 +194,22 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 		}
 	}
 
+	imports, err := findSourceImports(filepath.Join(output, "internal"), modPath)
+	if err != nil {
+		return fmt.Errorf("inspect copied imports: %w", err)
+	}
+
 	// 7. Print summary
-	fmt.Printf("\nModule %q decoupled → %s\n\n", name, output)
+	fmt.Printf("\nModule %q scaffolded → %s\n\n", name, output)
+	if len(imports) > 0 {
+		fmt.Println("  warn   copied Go files still import source-project packages:")
+		for _, imp := range imports {
+			fmt.Printf("         %s:%d: %s\n", imp.file, imp.line, imp.path)
+		}
+		fmt.Println("         These imports were not migrated. Wire shared dependencies or remote clients explicitly.")
+		fmt.Println("         A replace directive does not bypass Go's internal-package visibility rules.")
+		fmt.Println()
+	}
 	fmt.Printf("Next steps:\n\n")
 	for i, dep := range deps {
 		fmt.Printf("  %d. Implement client stubs in %s/internal/clients/%s/client.go\n", i+1, output, dep)
@@ -205,11 +220,57 @@ func DecoupleModule(name, modPath, output, port, transport, router, localFWPath 
 		fmt.Printf("     instead of the original service registry type\n")
 		base++
 	}
+	if len(imports) > 0 {
+		fmt.Printf("  %d. Resolve the source-project imports listed above and wire application services.\n", base)
+		base++
+	}
 	fmt.Printf("  %d. cd %s && go mod tidy && go build ./...\n\n", base, output)
 	fmt.Printf("  Run standalone:  fw dev\n")
 	fmt.Printf("  Build image:     docker build -t %s .\n\n", data.ModuleName)
 
 	return nil
+}
+
+type sourceImport struct {
+	file string
+	line int
+	path string
+}
+
+// findSourceImports inspects every copied Go file, including tests and build tags.
+func findSourceImports(dir, modPath string) ([]sourceImport, error) {
+	var imports []sourceImport
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("refuse to inspect non-regular Go file %s", path)
+		}
+		fileSet := token.NewFileSet()
+		file, err := parser.ParseFile(fileSet, path, nil, parser.ImportsOnly)
+		if err != nil {
+			return fmt.Errorf("parse imports from %s: %w", path, err)
+		}
+		for _, spec := range file.Imports {
+			importPath, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				return fmt.Errorf("parse import in %s: %w", path, err)
+			}
+			if importPath == modPath || strings.HasPrefix(importPath, modPath+"/") {
+				imports = append(imports, sourceImport{
+					file: path,
+					line: fileSet.PositionFor(spec.Pos(), false).Line,
+					path: importPath,
+				})
+			}
+		}
+		return nil
+	})
+	return imports, err
 }
 
 func findModuleFile(name string) (string, error) {
