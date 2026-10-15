@@ -4,7 +4,7 @@ go 1.26.9
 
 require (
 	github.com/charlesonunze/fw v0.5.0
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.3.0
 )
 
 replace github.com/charlesonunze/fw => ../../
