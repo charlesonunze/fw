@@ -1,6 +1,7 @@
 package fw
 
 import (
+	"container/heap"
 	"fmt"
 	"reflect"
 	"slices"
@@ -120,26 +121,54 @@ func orderApplicationServices(
 		})
 	}
 
-	available := make([]string, 0, len(services))
+	available := serviceHeap{
+		services:  make([]Service, 0, len(services)),
+		positions: registrationIndex,
+	}
 	for _, service := range services {
 		if indegree[service.Name()] == 0 {
-			available = append(available, service.Name())
+			available.services = append(available.services, service)
 		}
 	}
+	heap.Init(&available)
 	ordered := make([]Service, 0, len(services))
-	for len(available) > 0 {
-		name := available[0]
-		available = available[1:]
-		ordered = append(ordered, byName[name])
-		for _, dependent := range dependents[name] {
+	for available.Len() > 0 {
+		service := heap.Pop(&available).(Service)
+		ordered = append(ordered, service)
+		for _, dependent := range dependents[service.Name()] {
 			indegree[dependent]--
 			if indegree[dependent] == 0 {
-				available = append(available, dependent)
+				heap.Push(&available, byName[dependent])
 			}
 		}
-		slices.SortFunc(available, func(left, right string) int {
-			return registrationIndex[left] - registrationIndex[right]
-		})
 	}
 	return ordered, nil
+}
+
+// serviceHeap chooses the earliest registered service among eligible services.
+type serviceHeap struct {
+	services  []Service
+	positions map[string]int
+}
+
+func (h serviceHeap) Len() int { return len(h.services) }
+
+func (h serviceHeap) Less(i, j int) bool {
+	return h.positions[h.services[i].Name()] < h.positions[h.services[j].Name()]
+}
+
+func (h serviceHeap) Swap(i, j int) {
+	h.services[i], h.services[j] = h.services[j], h.services[i]
+}
+
+func (h *serviceHeap) Push(value any) {
+	h.services = append(h.services, value.(Service))
+}
+
+func (h *serviceHeap) Pop() any {
+	last := len(h.services) - 1
+	service := h.services[last]
+	h.services[last] = nil
+	h.services = h.services[:last]
+	return service
 }

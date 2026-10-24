@@ -3,7 +3,9 @@ package fw
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +102,18 @@ func TestOrderApplicationServices(t *testing.T) {
 		want     []string
 	}{
 		{
+			name:     "no services",
+			register: func(t *testing.T, app *App) {},
+			want:     []string{},
+		},
+		{
+			name: "one service",
+			register: func(t *testing.T, app *App) {
+				registerGraphService(t, app, &graphService{name: "postgres"})
+			},
+			want: []string{"postgres"},
+		},
+		{
 			name: "independent services preserve registration order",
 			register: func(t *testing.T, app *App) {
 				registerGraphService(t, app, &graphService{name: "redis"})
@@ -122,13 +136,14 @@ func TestOrderApplicationServices(t *testing.T) {
 			want: []string{"redis", "postgres", "rabbitmq", "reminders"},
 		},
 		{
-			name: "unrelated service keeps the earliest available position",
+			name: "newly eligible service precedes later waiting services",
 			register: func(t *testing.T, app *App) {
 				registerGraphService(t, app, &graphService{name: "river"}, DependsOn[graphDatabase]())
 				registerGraphService(t, app, &graphService{name: "metrics"})
 				registerGraphService(t, app, &graphService{name: "postgres"}, As[graphDatabase]())
+				registerGraphService(t, app, &graphService{name: "audit"})
 			},
-			want: []string{"metrics", "postgres", "river"},
+			want: []string{"metrics", "postgres", "river", "audit"},
 		},
 		{
 			name: "transitive dependencies are ordered",
@@ -139,8 +154,9 @@ func TestOrderApplicationServices(t *testing.T) {
 					DependsOn[graphDatabase](),
 				)
 				registerGraphService(t, app, &graphService{name: "postgres"}, As[graphDatabase]())
+				registerGraphService(t, app, &graphService{name: "metrics"})
 			},
-			want: []string{"postgres", "river", "scheduler"},
+			want: []string{"postgres", "river", "scheduler", "metrics"},
 		},
 		{
 			name: "diamond dependency visits shared service once",
@@ -189,6 +205,29 @@ func TestOrderApplicationServices(t *testing.T) {
 				t.Fatalf("service order = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestOrderApplicationServicesRandomDAGs(t *testing.T) {
+	rng := rand.New(rand.NewPCG(314, 159))
+	for iteration := range 2000 {
+		n := 1 + rng.IntN(80)
+		edges := make([][]int, n)
+		for i := range edges {
+			for j := 0; j < i; j++ {
+				if rng.IntN(10) == 0 {
+					edges[i] = append(edges[i], j)
+				}
+			}
+		}
+		fixture := newServiceOrderingFixture(edges, rng.Perm(n))
+		got, err := orderApplicationServices(fixture.services, fixture.dependencies, fixture.registry)
+		if err != nil {
+			t.Fatalf("graph %d: orderApplicationServices() error = %v", iteration, err)
+		}
+		if !slices.Equal(got, fixture.want) {
+			t.Fatalf("graph %d: order = %v, want %v", iteration, serviceNames(got), serviceNames(fixture.want))
+		}
 	}
 }
 
